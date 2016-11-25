@@ -59,19 +59,9 @@ def build_lstm_detector(reuse=False):
     lstm = tf.nn.rnn_cell.MultiRNNCell([cell] * 2)
     return lstm
 
-def q_func(processed_s, a, batch_size=1, init_state=None):
-    with tf.variable_scope("QFunction") as scope:
-        # dim_s = sum(processed_s.get_shape()[1:])
-        # s = tf.reshape(processed_s, [-1, dim_s])
-        inp = tf.concat(1, [s, a])
-
-        lstm = build_lstm_detector()
-        if init_state is None:
-            init_state = lstm.zero_state(batch_size, tf.float32)
-
-        output, state = tf.nn.dynamic_rnn(
-                lstm, processed_s, initial_state=init_state, swap_memory=True)
-        return output, state
+def get_lstm_zero_state(batch_size=1):
+    lstm = build_lstm_detector()
+    return lstm.zero_state(batch_size, tf.float32)
 
 def p_func(processed_s, batch_size=1, init_state=None):
     with tf.variable_scope('VPProcessor') as scope:
@@ -84,23 +74,24 @@ def _add_layer(x, out_dim, name):
         b = tf.get_variable('b', [out_dim], tf.float32)
         return tf.matmul(x, w) + b
 
-def predict_move(state, discrete_moves=1, continuous_moves=0, init_state=None, batch_size=1):
+def predict_move(state, discrete_moves=1, continuous_moves=0, init_state=None,
+        batch_size=1, reuse=False):
     assert continuous_moves == 0
-    with tf.variable_scope("ValuePolicyLSTM") as scope:
+    with tf.variable_scope("ValuePolicyLSTM", reuse=reuse) as scope:
         lstm = build_lstm_detector()
         if init_state is None:
             init_state = lstm.zero_state(batch_size, tf.float32)
 
         out, state = lstm(state, init_state)
 
-    with tf.variable_scope("PolicyTransform") as scope:
+    with tf.variable_scope("PolicyTransform", reuse=reuse) as scope:
         out = _add_layer(out, discrete_moves, "policy")
         out = tf.nn.softmax(out)
 
     return out, state
 
 def vp_func(state, discrete_moves=1, continuous_moves=0, init_state=None,
-        batch_size=32):
+        batch_size=1, reuse=False):
     assert continuous_moves == 0
     with tf.variable_scope("ValuePolicyLSTM") as scope:
         lstm = build_lstm_detector()
@@ -123,23 +114,30 @@ def add_data(l, d):
     if len(d) > MAX_DATA_SIZE:
         del d[MAX_DATA_SIZE/10:]
 
-def run_agent(sess, X, act, data, display=False):
-    env = gym.make(ENV)
+def run_agent(env, sess, X, act, data, state, init_state, display=False):
     while TRAINING:
         done = False
         o = env.reset()
-        states = [o]
+        states = []
+
+        lstm_state = None
 
         while not done:
             if display:
                 env.render()
             o = o.transpose(2, 0, 1)
             prev_o = o[None,:,:,:]
-            action = sess.run(act, feed_dict={X: prev_o})
+            if lstm_state is None:
+                action, lstm_state = sess.run([act, state],
+                        feed_dict={X: prev_o})
+            else:
+                action, lstm_state = sess.run([act, state],
+                        feed_dict={X: prev_o, init_state: lstm_state})
             action = np.squeeze(action)
             action = np.random.choice(MOVES, 1, p=action)
 
             o, r, done, info = env.step(action)
+            states.append((prev_o, action))
             add_data(data, (prev_o, action, r, o))
 
 def parse_args():
@@ -164,29 +162,40 @@ def main():
     parse_args()
 
     env = gym.make(ENV)
+    global MOVES
     MOVES = (env.action_space.n)
 
     # Images
     X = tf.placeholder(tf.float32, [None, 3, 250, 160])
+    V_u = tf.placeholder(tf.float32, [None, 1])
+    init_state = get_lstm_zero_state()
 
     features = build_conv_detector(X)
-    print(features.get_shape())
     features = tf.reshape(features, [-1, _product(features.get_shape()[1:])])
-    act, state = predict_move(features, discrete_moves=MOVES)
+
+    values, actions, states = vp_func(features, discrete_moves=MOVES,
+            init_state=init_state)
+    act, state = predict_move(features, discrete_moves=MOVES,
+            init_state=init_state, reuse=True)
 
     init_op = tf.initialize_all_variables()
 
     data = []
     with tf.Session() as sess:
         sess.run(init_op)
+        global TRAINING
         TRAINING = True
         threads = []
 
-        for i in range(8):
-            t = threading.Thread(target=run_agent, args=(sess, X, act, data,
-                True))
+        envs = [gym.make(ENV) for i in range(8)]
+        for i in envs:
+            t = threading.Thread(target=run_agent,
+                    args=(i, sess, X, act, data, state, init_state, True))
             t.start()
             threads.append(t)
+
+            time.sleep(4) # 3 is arbitrary number, but it needs to pause for a
+                          # sec here
 
         time.sleep(10)
         TRAINING = False
