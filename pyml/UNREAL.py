@@ -8,7 +8,7 @@ CONTINUOUS=False
 ENV="Centipede-v0"
 TRAINING=False
 MAX_DATA_SIZE=10000
-MAX_ASYNC_DATA_SIZE=100
+MAX_ASYNC_DATA_SIZE=5
 MOVES = 1
 GAMMA = 0.99
 
@@ -127,7 +127,7 @@ def add_data(l, d):
     if len(d) > MAX_DATA_SIZE:
         del d[MAX_DATA_SIZE/10:]
 
-def run_agent(env, sess, var, data, display=False):
+def run_agent(env, sess, var, data, writer, display=False):
     X = var['X']
     act = var['act']
     state = var['state']
@@ -138,12 +138,46 @@ def run_agent(env, sess, var, data, display=False):
     Adv = var['Adv']
     V_l = var['V_l']
     total_error = var['total_error']
+    summary = var['summary']
     while TRAINING:
         done = False
         o = env.reset().transpose(2, 0, 1)[None,:,:,:]
         states = []
 
         train_init_state = lstm_state = None
+
+
+        def train(states, lstm_state, bootstrap=None):
+            R = 0
+            if bootstrap is not None:
+                R = sess.run(values, feed_dict={X: bootstrap})
+
+            R = np.squeeze(R)
+            sta, a, _= zip(*states)
+            sta = np.array(sta).squeeze(1)
+            a = np.array(a)
+            R_t = []
+            mask = np.zeros((a .shape[0], MOVES))
+            mask[:,a] = 1
+            for i, s in enumerate(states):
+                _, _, rew = s
+                R_t.insert(0, GAMMA * R + rew)
+                R = R_t[0]
+            R_t = np.array(R_t)[:,None]
+            # print("R", R_t.shape, "act", act.shape, "State", sta.shape)
+            if  lstm_state is not None:
+                adv = R_t - sess.run(values,
+                        feed_dict={X: sta, init_state: lstm_state})
+                _, e, summ = sess.run([vp_train_op, total_error, summary],
+                        feed_dict={X: sta, init_state: lstm_state, Adv: adv,
+                            A_mask: mask, V_l: R_t})
+            else:
+                adv = R_t - sess.run(values,
+                        feed_dict={X: sta})
+                _, e, summ = sess.run([vp_train_op, total_error, summary],
+                        feed_dict={X: sta, Adv: adv, A_mask: mask, V_l: R_t})
+            writer.add_summary(summ)
+            print(e)
 
         while not done:
             if display:
@@ -167,29 +201,13 @@ def run_agent(env, sess, var, data, display=False):
 
             if len(states) > MAX_ASYNC_DATA_SIZE:
                 # Train using existing data
-                R = sess.run(values, feed_dict={X: o})
-                R = np.squeeze(R)
-                sta, a, _= zip(*states)
-                sta = np.array(sta).squeeze(1)
-                a = np.array(a )
-                R_t = []
-                mask = np.zeros((a .shape[0], MOVES))
-                mask[:,a] = 1
-                for i, s in enumerate(states):
-                    _, _, rew = s
-                    R_t.insert(0, GAMMA * R + rew)
-                    R = R_t[0]
-                R_t = np.array(R_t)[:,None]
-                # print("R", R_t.shape, "act", act.shape, "State", sta.shape)
-                if train_init_state is not None:
-                    adv = R_t - sess.run(values,
-                            feed_dict={X: sta, init_state: train_init_state})
-                else:
-                    adv = R_t - sess.run(values,
-                            feed_dict={X: sta})
-
+                train(states, train_init_state, bootstrap=o)
                 del states[:]
                 train_init_state = lstm_state
+
+        if len(states) != 0:
+            train(states, train_init_state, bootstrap=None)
+            del states[:]
 
 def parse_args():
     import argparse
@@ -216,32 +234,38 @@ def main():
     global MOVES
     MOVES = (env.action_space.n)
 
-    # Images
-    X = tf.placeholder(tf.float32, [None, 3, 250, 160])
+    with tf.name_scope('Inputs'):
+        # Images
+        X = tf.placeholder(tf.float32, [None, 3, 250, 160])
 
-    # List of state sequences
-    # Tuples of (state sequence, action sequence, reward sequence)
-    data = tf.FIFOQueue(128, [tf.float32, tf.int32, tf.float32])
-    V_l = tf.placeholder(tf.float32, [None, 1])
-    A_mask = tf.placeholder(tf.float32, [None, MOVES])
-    Adv = tf.placeholder(tf.float32, [None, 1])
-    init_state = get_lstm_zero_state()
+        # List of state sequences
+        # Tuples of (state sequence, action sequence, reward sequence)
+        V_l = tf.placeholder(tf.float32, [None, 1])
+        A_mask = tf.placeholder(tf.float32, [None, MOVES])
+        Adv = tf.placeholder(tf.float32, [None, 1])
+    with tf.name_scope('LSTMZeroState'):
+        init_state = get_lstm_zero_state()
 
-    features = build_conv_detector(X)
-    print(features.get_shape())
-    features = tf.reshape(features, [-1, _product(features.get_shape()[1:])])
-    print(features.get_shape())
+    with tf.name_scope('ImageProcessor'):
+        features = build_conv_detector(X)
+        features = tf.reshape(features, [-1, _product(features.get_shape()[1:])])
 
-    actions, values, states = vp_func(features, discrete_moves=MOVES,
-            init_state=init_state)
-    act, state = predict_move(features, discrete_moves=MOVES,
-            init_state=init_state, reuse=True)
+    with tf.name_scope('ValuePolicyGenerator'):
+        actions, values, states = vp_func(features, discrete_moves=MOVES,
+                init_state=init_state)
+    with tf.name_scope('PolicyFunction'):
+        act, state = predict_move(features, discrete_moves=MOVES,
+                init_state=init_state, reuse=True)
 
-    v_error = tf.reduce_sum(tf.squared_difference(values, V_l))
-    p_error = tf.reduce_sum(
-            -tf.log(tf.clip_by_value(A_mask * actions, 0.001, 0.999)) * Adv)
+    with tf.name_scope('ErrorFunctions'):
+        v_error = tf.reduce_sum(tf.squared_difference(values, V_l))
+        p_error = tf.reduce_sum(
+                -tf.log(tf.clip_by_value(A_mask * actions, 0.001, 0.999)) * Adv)
 
-    total_error = v_error + p_error
+        total_error = v_error + p_error
+        tf.scalar_summary('Value Error', v_error)
+        tf.scalar_summary('Policy Error', p_error)
+        tf.scalar_summary('Total Error', total_error)
 
     lstm_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES,
             scope='ValuePolicyLSTM')
@@ -252,33 +276,60 @@ def main():
     v_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES,
             scope='ValueTransform')
 
-    with tf.device('/gpu:0'):
-        v_optimizer = tf.train.RMSPropOptimizer(1e-5)
-        gvs = v_optimizer.compute_gradients(v_error,
-                var_list=v_vars+i_vars+lstm_vars)
+    with tf.name_scope('gradients'):
+        with tf.device('/gpu:0'):
+            v_optimizer = tf.train.RMSPropOptimizer(1e-3)
+            gvs = v_optimizer.compute_gradients(v_error,
+                    var_list=v_vars+i_vars+lstm_vars)
 
-        # v_grads = [tf.Variable(tf.zeros_like(gv[1]), trainable=False) for gv in gvs]
-        # accum_v_op = [v_grads[i].assign_add(gv[0]) for i, gv in enumerate(gvs)]
-        # reset_v_grad = tf.initialize_variables(v_grads)
+            # v_grads = [tf.Variable(tf.zeros_like(gv[1]), trainable=False) for gv in gvs]
+            # accum_v_op = [v_grads[i].assign_add(gv[0]) for i, gv in enumerate(gvs)]
+            # reset_v_grad = tf.initialize_variables(v_grads)
 
-        # v_train_op = v_optimizer.apply_gradients(
-                # [(g.assign(g), gv[1]) for g, gv in zip(v_grads, gvs)])
-        v_train_op = v_optimizer.apply_gradients(
-                [(tf.clip_by_average_norm(gv[0], 5), gv[1]) for gv in gvs])
+            # v_train_op = v_optimizer.apply_gradients(
+                    # [(g.assign(g), gv[1]) for g, gv in zip(v_grads, gvs)])
+            v_train_op = v_optimizer.apply_gradients(
+                    [(tf.clip_by_average_norm(gv[0], 5), gv[1]) for gv in gvs])
 
-        p_opt = tf.train.RMSPropOptimizer(1e-5)
-        gvs = p_opt.compute_gradients(p_error, var_list=i_vars+p_vars+lstm_vars)
-        p_train_op = p_opt.apply_gradients(
-                [(tf.clip_by_average_norm(gv[0], 5), gv[1]) for gv in gvs])
+            p_opt = tf.train.RMSPropOptimizer(1e-3)
+            gvs = p_opt.compute_gradients(p_error, var_list=i_vars+p_vars+lstm_vars)
+            p_train_op = p_opt.apply_gradients(
+                    [(tf.clip_by_average_norm(gv[0], 5), gv[1]) for gv in gvs])
 
-        vp_train_op = [p_train_op, v_train_op]
+            vp_train_op = [p_train_op, v_train_op]
 
+        with tf.device('/cpu:0'):
+            v_optimizer_cpu = tf.train.RMSPropOptimizer(1e-3)
+            gvs = v_optimizer.compute_gradients(v_error,
+                    var_list=v_vars+i_vars+lstm_vars)
+
+            # v_grads = [tf.Variable(tf.zeros_like(gv[1]), trainable=False) for gv in gvs]
+            # accum_v_op = [v_grads[i].assign_add(gv[0]) for i, gv in enumerate(gvs)]
+            # reset_v_grad = tf.initialize_variables(v_grads)
+
+            # v_train_op = v_optimizer.apply_gradients(
+                    # [(g.assign(g), gv[1]) for g, gv in zip(v_grads, gvs)])
+            v_train_op_cpu = v_optimizer.apply_gradients(
+                    [(tf.clip_by_average_norm(gv[0], 5), gv[1]) for gv in gvs])
+
+            p_opt_cpu = tf.train.RMSPropOptimizer(1e-3)
+            gvs = p_opt.compute_gradients(p_error, var_list=i_vars+p_vars+lstm_vars)
+            p_train_op_cpu = p_opt.apply_gradients(
+                    [(tf.clip_by_average_norm(gv[0], 5), gv[1]) for gv in gvs])
+
+            vp_train_op_cpu = [p_train_op_cpu, v_train_op_cpu]
+
+    summaries = tf.merge_all_summaries()
+
+    saver = tf.train.Saver()
     init_op = tf.initialize_all_variables() #tf.initialize_variables(i_vars + lstm_vars + p_vars + v_vars)
 
     var = {
             'X': X, 'act': act, 'state': state, 'init_state': init_state,
             'values': values, 'vp_train_op': vp_train_op, 'A_mask': A_mask,
-            'Adv': Adv, 'V_l': V_l, 'total_error': total_error
+            'Adv': Adv, 'V_l': V_l, 'total_error': total_error,
+            # 'vp_train_op_cpu': vp_train_op_cpu
+            'summary': summaries
             }
     config = tf.ConfigProto(
             # device_count={'GPU': 0}
@@ -286,25 +337,27 @@ def main():
     data = []
     with tf.Session(config=config) as sess:
         sess.run(init_op)
+        sw = tf.train.SummaryWriter('tflogs/a3c', sess.graph)
         global TRAINING
         TRAINING = True
         threads = []
 
-        envs = [gym.make(ENV) for i in range(1)]
-        for i in envs:
+        envs = [gym.make(ENV) for i in range(3)]
+        for i, e in enumerate(envs):
+            if i % 2 == 0:
+                var.update({'vp_train_op': vp_train_op_cpu})
+            else:
+                var.update({'vp_train_op': vp_train_op})
             t = threading.Thread(target=run_agent,
-                    args=(i, sess, var, data, True))
+                    args=(e, sess, var, data, sw, True))
             t.start()
             threads.append(t)
 
-            time.sleep(5) # 3 is arbitrary number, but it needs to pause for a
+            time.sleep(3) # 3 is arbitrary number, but it needs to pause for a
                           # sec here to let things render independently
 
-        time.sleep(10)
+        time.sleep(5)
         TRAINING = False
-
-        for t in threads:
-            t.join()
 
 
 if __name__ == '__main__':
