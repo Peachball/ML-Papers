@@ -1,11 +1,11 @@
 from __future__ import print_function
 import tensorflow as tf
 import gym
-import gym_ple
+# import gym_ple
 import numpy as np
 
 CONTINUOUS=False
-ENV="Centipede-v0"
+ENV="Skiing-v0"
 TRAINING=False
 MAX_DATA_SIZE=10000
 MAX_ASYNC_DATA_SIZE=5
@@ -23,8 +23,10 @@ def conv_layer(X, shape, name, strides=[1,1,1,1], reuse=False):
         if reuse:
             scope.reuse_variables()
         X = tf.transpose(X, perm=[0, 2, 3, 1])
-        w = tf.get_variable('w', shape=shape, dtype=tf.float32)
-        b = tf.get_variable('b', shape=[1, 1, 1, shape[-1]], dtype=tf.float32)
+        w = tf.get_variable('w', shape=shape, dtype=tf.float32,
+                initializer=tf.contrib.layers.xavier_initializer())
+        b = tf.get_variable('b', shape=[1, 1, 1, shape[-1]], dtype=tf.float32,
+                initializer=tf.random_uniform_initializer(minval=0, maxval=0))
         out = tf.nn.conv2d(X, w, strides, 'SAME', data_format='NHWC') + b
         return tf.transpose(out, perm=[0, 3, 1, 2])
 
@@ -74,8 +76,11 @@ def p_func(processed_s, batch_size=1, init_state=None):
 def _add_layer(x, out_dim, name):
     assert len(x.get_shape()) == 2
     with tf.variable_scope(name) as scope:
-        w = tf.get_variable("w", [x.get_shape()[1], out_dim], tf.float32)
-        b = tf.get_variable('b', [out_dim], tf.float32)
+        w = tf.get_variable("w", [x.get_shape()[1], out_dim], tf.float32,
+                initializer=tf.random_uniform_initializer(minval=-0.001,
+                    maxval=0.001))
+        b = tf.get_variable('b', [out_dim], tf.float32,
+                initializer=tf.random_uniform_initializer(minval=0, maxval=0))
         return tf.matmul(x, w) + b
 
 def predict_move(state, discrete_moves=1, continuous_moves=0, init_state=None,
@@ -139,13 +144,14 @@ def run_agent(env, sess, var, data, writer, display=False):
     V_l = var['V_l']
     total_error = var['total_error']
     summary = var['summary']
+    R_total = var['R_total']
     while TRAINING:
         done = False
         o = env.reset().transpose(2, 0, 1)[None,:,:,:]
         states = []
 
         train_init_state = lstm_state = None
-
+        total_reward = 0
 
         def train(states, lstm_state, bootstrap=None):
             R = 0
@@ -190,9 +196,12 @@ def run_agent(env, sess, var, data, writer, display=False):
                 action, lstm_state = sess.run([act, state],
                         feed_dict={X: prev_o, init_state: lstm_state})
             action = np.squeeze(action)
+            if action.max() > 0.5:
+                print(action)
             action = np.random.choice(MOVES, 1, p=action)
 
             o, r, done, info = env.step(action)
+            total_reward += r
             o = o.transpose(2, 0, 1)
             o = o[None,:,:,:]
 
@@ -236,13 +245,17 @@ def main():
 
     with tf.name_scope('Inputs'):
         # Images
-        X = tf.placeholder(tf.float32, [None, 3, 250, 160])
+        X = tf.placeholder(tf.float32, [None, 3, 250, 160], name='States')
 
         # List of state sequences
         # Tuples of (state sequence, action sequence, reward sequence)
         V_l = tf.placeholder(tf.float32, [None, 1])
         A_mask = tf.placeholder(tf.float32, [None, MOVES])
         Adv = tf.placeholder(tf.float32, [None, 1])
+
+        R_total = tf.placeholder(tf.float32, [1])
+        # tf.scalar_summary('Reward over time', R_total)
+
     with tf.name_scope('LSTMZeroState'):
         init_state = get_lstm_zero_state()
 
@@ -276,9 +289,11 @@ def main():
     v_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES,
             scope='ValueTransform')
 
+    policy_lr = 1e-4
+    value_lr = 1e-3
     with tf.name_scope('gradients'):
         with tf.device('/gpu:0'):
-            v_optimizer = tf.train.RMSPropOptimizer(1e-3)
+            v_optimizer = tf.train.RMSPropOptimizer(value_lr)
             gvs = v_optimizer.compute_gradients(v_error,
                     var_list=v_vars+i_vars+lstm_vars)
 
@@ -291,7 +306,7 @@ def main():
             v_train_op = v_optimizer.apply_gradients(
                     [(tf.clip_by_average_norm(gv[0], 5), gv[1]) for gv in gvs])
 
-            p_opt = tf.train.RMSPropOptimizer(1e-3)
+            p_opt = tf.train.RMSPropOptimizer(policy_lr, epsilon=1)
             gvs = p_opt.compute_gradients(p_error, var_list=i_vars+p_vars+lstm_vars)
             p_train_op = p_opt.apply_gradients(
                     [(tf.clip_by_average_norm(gv[0], 5), gv[1]) for gv in gvs])
@@ -299,7 +314,7 @@ def main():
             vp_train_op = [p_train_op, v_train_op]
 
         with tf.device('/cpu:0'):
-            v_optimizer_cpu = tf.train.RMSPropOptimizer(1e-3)
+            v_optimizer_cpu = tf.train.RMSPropOptimizer(value_lr)
             gvs = v_optimizer.compute_gradients(v_error,
                     var_list=v_vars+i_vars+lstm_vars)
 
@@ -312,7 +327,7 @@ def main():
             v_train_op_cpu = v_optimizer.apply_gradients(
                     [(tf.clip_by_average_norm(gv[0], 5), gv[1]) for gv in gvs])
 
-            p_opt_cpu = tf.train.RMSPropOptimizer(1e-3)
+            p_opt_cpu = tf.train.RMSPropOptimizer(policy_lr, epsilon=1)
             gvs = p_opt.compute_gradients(p_error, var_list=i_vars+p_vars+lstm_vars)
             p_train_op_cpu = p_opt.apply_gradients(
                     [(tf.clip_by_average_norm(gv[0], 5), gv[1]) for gv in gvs])
@@ -329,7 +344,7 @@ def main():
             'values': values, 'vp_train_op': vp_train_op, 'A_mask': A_mask,
             'Adv': Adv, 'V_l': V_l, 'total_error': total_error,
             # 'vp_train_op_cpu': vp_train_op_cpu
-            'summary': summaries
+            'summary': summaries, 'R_total': R_total
             }
     config = tf.ConfigProto(
             # device_count={'GPU': 0}
@@ -342,9 +357,9 @@ def main():
         TRAINING = True
         threads = []
 
-        envs = [gym.make(ENV) for i in range(3)]
+        envs = [gym.make(ENV) for i in range(8)]
         for i, e in enumerate(envs):
-            if i % 2 == 0:
+            if i % 3 == 0:
                 var.update({'vp_train_op': vp_train_op_cpu})
             else:
                 var.update({'vp_train_op': vp_train_op})
@@ -353,8 +368,10 @@ def main():
             t.start()
             threads.append(t)
 
-            time.sleep(3) # 3 is arbitrary number, but it needs to pause for a
-                          # sec here to let things render independently
+            time.sleep(3)
+
+        while True:
+            pass
 
         time.sleep(5)
         TRAINING = False
