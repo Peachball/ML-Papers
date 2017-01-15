@@ -11,6 +11,8 @@ MAX_DATA_SIZE=10000
 MAX_ASYNC_DATA_SIZE=5
 MOVES = 1
 GAMMA = 0.99
+UPDATE=False
+LSTM=True
 
 def conv_layer(X, shape, name, strides=[1,1,1,1], reuse=False):
     '''
@@ -22,13 +24,14 @@ def conv_layer(X, shape, name, strides=[1,1,1,1], reuse=False):
     with tf.variable_scope(name) as scope:
         if reuse:
             scope.reuse_variables()
-        X = tf.transpose(X, perm=[0, 2, 3, 1])
-        w = tf.get_variable('w', shape=shape, dtype=tf.float32,
-                initializer=tf.contrib.layers.xavier_initializer())
-        b = tf.get_variable('b', shape=[1, 1, 1, shape[-1]], dtype=tf.float32,
-                initializer=tf.random_uniform_initializer(minval=0, maxval=0))
-        out = tf.nn.conv2d(X, w, strides, 'SAME', data_format='NHWC') + b
-        return tf.transpose(out, perm=[0, 3, 1, 2])
+        with tf.name_scope('convolution'):
+            X = tf.transpose(X, perm=[0, 2, 3, 1])
+            w = tf.get_variable('w', shape=shape, dtype=tf.float32,
+                    initializer=tf.contrib.layers.xavier_initializer())
+            b = tf.get_variable('b', shape=[1, 1, 1, shape[-1]], dtype=tf.float32,
+                    initializer=tf.random_uniform_initializer(minval=0, maxval=0))
+            out = tf.nn.conv2d(X, w, strides, 'SAME', data_format='NHWC') + b
+            return tf.transpose(out, perm=[0, 3, 1, 2])
 
 def act(inp, name):
     assert name in ['relu', 'softplus']
@@ -36,6 +39,11 @@ def act(inp, name):
         return tf.nn.relu(inp)
     if name=='softplus':
         return tf.nn.softplus(inp)
+
+def unpool(inp, dim=[2, 2], data_format='NCHW'):
+    if data_format == 'NCHW':
+        return tf.tile(inp, [1,1] + dim)
+    raise Exception('Not implemented yet')
 
 def pool(inp, dim=[2, 2]):
     inp = tf.transpose(inp, perm=[0, 2, 3, 1])
@@ -61,8 +69,9 @@ def build_conv_detector(image, reuse=False):
     return net
 
 def build_lstm_detector(reuse=False):
-    cell = tf.nn.rnn_cell.LSTMCell(256, use_peepholes=True)
-    lstm = tf.nn.rnn_cell.MultiRNNCell([cell] * 2)
+    if LSTM:
+        cell = tf.nn.rnn_cell.LSTMCell(256, use_peepholes=True)
+        lstm = tf.nn.rnn_cell.MultiRNNCell([cell] * 2)
     return lstm
 
 def get_lstm_zero_state(batch_size=1):
@@ -130,6 +139,7 @@ def vp_func(state,
 def add_data(l, d):
     l.append(d)
     if len(d) > MAX_DATA_SIZE:
+        print('Deleting data')
         del d[MAX_DATA_SIZE/10:]
 
 def run_agent(env, sess, var, data, writer, display=False):
@@ -145,6 +155,7 @@ def run_agent(env, sess, var, data, writer, display=False):
     total_error = var['total_error']
     summary = var['summary']
     R_total = var['R_total']
+    epsilon = 0.1
     while TRAINING:
         done = False
         o = env.reset().transpose(2, 0, 1)[None,:,:,:]
@@ -154,6 +165,9 @@ def run_agent(env, sess, var, data, writer, display=False):
         total_reward = 0
 
         def train(states, lstm_state, bootstrap=None):
+            global UPDATE
+            if not UPDATE:
+                return
             R = 0
             if bootstrap is not None:
                 R = sess.run(values, feed_dict={X: bootstrap})
@@ -183,7 +197,7 @@ def run_agent(env, sess, var, data, writer, display=False):
                 _, e, summ = sess.run([vp_train_op, total_error, summary],
                         feed_dict={X: sta, Adv: adv, A_mask: mask, V_l: R_t})
             writer.add_summary(summ)
-            print(e)
+            print("Error", e)
 
         while not done:
             if display:
@@ -197,10 +211,14 @@ def run_agent(env, sess, var, data, writer, display=False):
                         feed_dict={X: prev_o, init_state: lstm_state})
             action = np.squeeze(action)
             if action.max() > 0.5:
-                print(action)
-            action = np.random.choice(MOVES, 1, p=action)
+                print("Action:", action)
+            random_action = env.action_space.sample()
+            action = np.argmax(action)
 
-            o, r, done, info = env.step(action)
+            o, r, done, info = env.step(
+                    np.random.choice([action, random_action],
+                        1,
+                        p=[epsilon, 1-epsilon]))
             total_reward += r
             o = o.transpose(2, 0, 1)
             o = o[None,:,:,:]
@@ -234,6 +252,23 @@ def _product(l):
         a = a * int(i)
     return a
 
+def aux_functions(features):
+    with tf.variable_scope('Aux Functions'):
+        flat_features = tf.reshape(features,
+                [-1, _product(features.get_shape()[1:])])
+
+        name = 'Reward detector'
+        with tf.variable_scope(name), tf.name_scope(name):
+            net = _add_layer(flat_features, 256)
+            net = tf.tanh(net)
+            net = _add_layer(flat_features, 256)
+            rew_prediction = tf.nn.softmax(net)
+
+        name = 'Pixel Control'
+        with tf.variable_scope(name), tf.name_scope(name):
+            pass
+
+
 def main():
     import time
     import threading
@@ -249,23 +284,26 @@ def main():
 
         # List of state sequences
         # Tuples of (state sequence, action sequence, reward sequence)
-        V_l = tf.placeholder(tf.float32, [None, 1])
-        A_mask = tf.placeholder(tf.float32, [None, MOVES])
-        Adv = tf.placeholder(tf.float32, [None, 1])
+        V_l = tf.placeholder(tf.float32, [None, 1],
+                name='Value_function_labels')
+        A_mask = tf.placeholder(tf.float32, [None, MOVES], name='Action_mask')
+        Adv = tf.placeholder(tf.float32, [None, 1], name='Advantage')
 
-        R_total = tf.placeholder(tf.float32, [1])
-        # tf.scalar_summary('Reward over time', R_total)
+        R_t = tf.placeholder(tf.float32, [None, 1], name='Rewards')
+
+        F_l = tf.placeholder(tf.float32, [None, None], name='Features')
 
     with tf.name_scope('LSTMZeroState'):
         init_state = get_lstm_zero_state()
 
     with tf.name_scope('ImageProcessor'):
-        features = build_conv_detector(X)
-        features = tf.reshape(features, [-1, _product(features.get_shape()[1:])])
+        o_feat = build_conv_detector(X)
+        features = tf.reshape(o_feat, [-1, _product(o_feat.get_shape()[1:])])
 
     with tf.name_scope('ValuePolicyGenerator'):
         actions, values, states = vp_func(features, discrete_moves=MOVES,
                 init_state=init_state)
+
     with tf.name_scope('PolicyFunction'):
         act, state = predict_move(features, discrete_moves=MOVES,
                 init_state=init_state, reuse=True)
@@ -289,8 +327,8 @@ def main():
     v_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES,
             scope='ValueTransform')
 
-    policy_lr = 1e-4
-    value_lr = 1e-3
+    policy_lr = 1e-5
+    value_lr = 1e-4
     with tf.name_scope('gradients'):
         with tf.device('/gpu:0'):
             v_optimizer = tf.train.RMSPropOptimizer(value_lr)
@@ -337,14 +375,15 @@ def main():
     summaries = tf.merge_all_summaries()
 
     saver = tf.train.Saver()
-    init_op = tf.initialize_all_variables() #tf.initialize_variables(i_vars + lstm_vars + p_vars + v_vars)
+    init_op = tf.initialize_all_variables()
 
     var = {
             'X': X, 'act': act, 'state': state, 'init_state': init_state,
             'values': values, 'vp_train_op': vp_train_op, 'A_mask': A_mask,
-            'Adv': Adv, 'V_l': V_l, 'total_error': total_error,
+            'Adv': Adv, 'V_l': V_l,
+            'total_error': [total_error, v_error, p_error],
             # 'vp_train_op_cpu': vp_train_op_cpu
-            'summary': summaries, 'R_total': R_total
+            'summary': summaries, 'R_total': R_t
             }
     config = tf.ConfigProto(
             # device_count={'GPU': 0}
@@ -357,7 +396,7 @@ def main():
         TRAINING = True
         threads = []
 
-        envs = [gym.make(ENV) for i in range(8)]
+        envs = [gym.make(ENV) for i in range(3)]
         for i, e in enumerate(envs):
             if i % 3 == 0:
                 var.update({'vp_train_op': vp_train_op_cpu})
@@ -368,12 +407,13 @@ def main():
             t.start()
             threads.append(t)
 
-            time.sleep(3)
+            time.sleep(2)
 
+        global UPDATE
+        UPDATE = True
         while True:
             pass
 
-        time.sleep(5)
         TRAINING = False
 
 

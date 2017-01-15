@@ -3,6 +3,8 @@
 import numpy as np
 import tensorflow as tf
 import matplotlib.pyplot as plt
+import matplotlib.animation as animation
+import threading
 
 def data_gen(batch_size=32,
         img_size=[1024, 1024],
@@ -212,9 +214,9 @@ def DRAWNetwork():
     Lx = tf.reduce_mean(tf.reduce_sum(tf.squared_difference(final_canvas, X), 1))
 
     loss = Lx + latent_loss
-    tf.scalar_summary("Loss", loss)
+    tf.summary.scalar("Loss", loss)
 
-    summaries = tf.merge_all_summaries()
+    summaries = tf.summary.merge_all()
     saver = tf.train.Saver()
     lr = tf.Variable(0.001)
     opt = tf.train.AdamOptimizer(lr, beta1=0.5)
@@ -356,14 +358,30 @@ def write_attn(dec_h, N=5, channels=3, share=True, image_size=None, timestep=0):
         write.append(myx / (b_gamma + 0.001))
     return tf.transpose(tf.pack(write), perm=[1, 0, 2, 3])
 
-def BigDraw():
+def mnist_gen(batch_size=32):
+    from keras.datasets import mnist
+    (a, _), (c, _) = mnist.load_data()
+    a = a.astype('float32') / 255.0
+    c = c.astype('float32') / 255.0
+    a = a.reshape(-1, 1, 28, 28)
+    c = c.reshape(-1, 1, 28, 28)
+    d = np.concatenate((a, c), axis=0)
+    while True:
+        for i in range(0, d.shape[0], 32):
+            if i + 32 > d.shape[0]:
+                continue
+            yield d[i:i+32]
+
+def BigDraw(demo=False):
     batch_size=32
-    timesteps = 50
+    timesteps = 30
     latent_size= 100
     decoded_size = 500
     encoded_size = 500
     N = 10
-    image_size = [3, 64, 64]
+    image_size = [1, 28, 28]
+    SAVE_PATH = 'tflogs/mnist_draw_attn'
+
     X = tf.placeholder(tf.float32, [batch_size] + image_size)
 
     init_dec_h = dec_h = tf.constant(0, shape=[batch_size, decoded_size],
@@ -377,6 +395,7 @@ def BigDraw():
     latent_loss = 0.0
     drawings = []
     for i in range(timesteps):
+        print('\rFinished layer {} out of {}'.format(i+1, timesteps), end="")
         x_hat = X - tf.sigmoid(canvas)
         r_t = read_attn(X, x_hat, dec_h, share=share, N=N)
         r_t = tf.reshape(r_t, [batch_size, -1])
@@ -390,10 +409,11 @@ def BigDraw():
                 init_state=dec_state, batch_size=batch_size, share=share)
 
         c_t = write_attn(dec_h, share=share,
-                image_size=image_size[1:], timestep=i)
+                image_size=image_size[1:], timestep=i, channels=image_size[0])
         canvas = canvas + c_t
         drawings.append(tf.sigmoid(canvas))
         share=True
+    print()
     final_canvas = canvas
     latent_loss = tf.reduce_sum(latent_loss / timesteps)
     Lx = tf.squared_difference(tf.sigmoid(final_canvas), X)
@@ -401,9 +421,9 @@ def BigDraw():
     Lx = tf.reduce_mean(Lx)
 
     loss = Lx + latent_loss
-    tf.scalar_summary('loss', loss)
+    tf.summary.scalar('loss', loss)
 
-    summaries = tf.merge_all_summaries()
+    summaries = tf.summary.merge_all()
     lr = tf.Variable(1e-3)
     global_step = tf.Variable(0)
     opt = tf.train.RMSPropOptimizer(lr, epsilon=1e-3)
@@ -414,56 +434,72 @@ def BigDraw():
 
     train_step = opt.apply_gradients(grad, global_step=global_step)
 
-    writer = tf.train.SummaryWriter('tflogs/draw_attn')
+    writer = tf.summary.FileWriter(SAVE_PATH)
     saver = tf.train.Saver()
-    init_op = tf.initialize_all_variables()
+    init_op = tf.global_variables_initializer()
 
-    ema = 1000
-    p_e = ema
-    print(saver.last_checkpoints)
-    with tf.Session() as sess:
-        try:
-            cpkt = tf.train.get_checkpoint_state('tflogs/draw_attn/')
-            saver.restore(sess, cpkt.model_checkpoint_path)
-        except Exception as e:
-            print(e)
-            print("Unable to load previous graph")
-            sess.run(init_op)
-        writer.add_graph(sess.graph)
-        alpha = lr.eval()
-        print(alpha)
+    drawings = np.zeros((batch_size, timesteps) + image_size)
+    def trainer():
+        ema = 1000
+        p_e = ema
+        with tf.Session() as sess:
+            try:
+                print('Attempting to load previous graph...')
+                cpkt = tf.train.get_checkpoint_state(SAVE_PATH)
+                saver.restore(sess, cpkt.model_checkpoint_path)
+            except Exception as e:
+                print(e)
+                print("Unable to load previous graph")
+                sess.run(init_op)
+            writer.add_graph(sess.graph)
+            alpha = lr.eval()
+            print('Current learning rate: {}'.format(alpha))
 
-        plt.ion()
-        print('Beginning generation')
-        for d in data_gen(img_size=image_size[1:]):
-            (_,
-             e,
-             s,
-             dr,
-             lx,
-             lz,
-             i
-              ) = sess.run([train_step,
-                  loss,
-                  summaries,
-                  drawings,
-                  Lx,
-                  latent_loss,
-                  global_step], feed_dict={X: d, lr: alpha})
-            writer.add_summary(s, global_step=i)
-            ema = 0.99 * ema + 0.01 * e
-            if i % 20 == 0 and ema > p_e:
-                print("Learning rate decreased")
-                alpha = alpha / 2
-            if i % 10 == 0:
-                plt.subplot(121)
-                plt.imshow(dr[-1][0].transpose(1, 2, 0))
-                plt.subplot(122)
-                plt.imshow(d[0].transpose(1, 2, 0))
-                plt.pause(0.05)
-            if i % 50 == 0:
-                saver.save(sess, 'tflogs/draw_attn/model', global_step=global_step)
-            print(e, lx, lz, ema)
+            print('Beginning generation')
+            for d in mnist_gen(batch_size=batch_size):
+                (_,
+                 e,
+                 s,
+                 dr,
+                 lx,
+                 lz,
+                 i
+                  ) = sess.run([train_step,
+                      loss,
+                      summaries,
+                      drawings,
+                      Lx,
+                      latent_loss,
+                      global_step], feed_dict={X: d, lr: alpha})
+                writer.add_summary(s, global_step=i)
+                ema = 0.99 * ema + 0.01 * e
+                if i % 20 == 0 and ema > p_e:
+                    print("Learning rate decreased")
+                    alpha = alpha / 2
+                if i % 10 == 0:
+                    drawings = dr
+                    # plt.subplot(121)
+                    # plt.imshow(np.squeeze(dr[-1][0].transpose(1, 2, 0)),
+                            # cmap='Greys')
+                    # plt.subplot(122)
+                    # plt.imshow(d[0].transpose(1, 2, 0).squeeze(), cmap='Greys')
+                    # plt.pause(0.05)
+                if i % 50 == 0:
+                    saver.save(sess, SAVE_PATH, ep=global_step)
+                print(e, lx, lz, ema)
+
+    t = threading.Thread(target=trainer())
+    t.start()
+
+    def show_image(i):
+        return drawings[]
+        pass
+
+    def update(*args):
+        pass
+
+    fig = plt.figure()
+
 
 if __name__ == '__main__':
     BigDraw()
