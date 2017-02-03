@@ -67,7 +67,7 @@ def main():
                 tf.one_hot(y, 10)),
             name='adv_error')
 
-    error = 0 * ex_error + adv_error
+    error = 0 * ex_error + 1 * adv_error
     tf.summary.scalar("Error", error)
     total_correct = tf.Variable(0, name='total_correct')
     total_ex = tf.Variable(0, name='total_example')

@@ -2,6 +2,9 @@ import tensorflow as tf
 
 def add_layer(l, out_dim, name, reuse=False, w_init=None, b_init=None,
         collections=None):
+    '''
+        out_dim is a scalar
+    '''
     with tf.variable_scope(name, reuse=reuse):
         l_s = l.get_shape()
         w = tf.get_variable("w", shape=[l_s[1], out_dim], initializer=w_init)
@@ -14,6 +17,9 @@ def add_layer(l, out_dim, name, reuse=False, w_init=None, b_init=None,
 
 def add_conv_layer(l, filt_dim, name, strides=[1, 1], reuse=False, w_init=None,
         b_init=None):
+    '''
+        filt_dim is of the shape [x, y, output channels]
+    '''
     assert len(l.get_shape()) >= 4
     assert len(filt_dim) == 3
     with tf.variable_scope(name, reuse=reuse) as scope:
@@ -35,7 +41,3 @@ def flatten(l):
     for i in l.get_shape()[1:]:
         dim *= int(i)
     return tf.reshape(l, [-1, dim])
-
-
-def openimages_generator():
-    pass
