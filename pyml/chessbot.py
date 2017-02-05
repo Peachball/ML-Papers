@@ -13,7 +13,7 @@ import requests
 def get_args():
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--logdir", default='tflogs/chess/linear_errorv2',
+    parser.add_argument("--logdir", default='tflogs/chess/copycat',
             type=str, help="Location to store tensorflow logs")
 
     parser.add_argument("--batch_size", default=32, type=int,
@@ -64,7 +64,8 @@ def convert_to_array(board):
     return (white, np.rot90(black, k=2))
 
 
-def play_self(sess, enqueue, X, Y, V, coord, verbose=False, log_dir=None):
+def play_self(sess, enqueue, X, Y, V, coord, verbose=False, log_dir=None,
+        copycat=True):
     SAVE_TIME = 0
     b = chess.Board()
     b.reset()
@@ -87,9 +88,15 @@ def play_self(sess, enqueue, X, Y, V, coord, verbose=False, log_dir=None):
                     bw = 1
                 print("Played game of length {}, {} won"
                         .format(len(white_states), ww))
-                sess.run(enqueue, feed_dict={X: np.array(white_states),
-                    Y: [ww] * len(white_states)})
-                sess.run(enqueue, feed_dict={X: np.array(black_states), Y:[bw] *
+                if not copycat:
+                    sess.run(enqueue, feed_dict={X: np.array(white_states),
+                        Y: [ww] * len(white_states)})
+                    sess.run(enqueue, feed_dict={X: np.array(black_states), Y:[bw] *
+                        len(black_states)})
+            if copycat:
+                sess.run(enqueue, feed_dict={X: np.array(white_states), Y: [0] *
+                    len(white_states)})
+                sess.run(enqueue, feed_dict={X: np.array(black_states), Y: [0] *
                     len(black_states)})
 
             del white_states[:]
@@ -148,18 +155,31 @@ def play_self(sess, enqueue, X, Y, V, coord, verbose=False, log_dir=None):
             black_states.append(black)
 
 
-def data_loading_thread(sess, enqueue, X, Y, coord):
+def data_loading_thread(sess, enqueue, X, Y, coord, belikepro=True):
     gen = load_data()
     while not coord.should_stop():
         w, b, r = next(gen)
+        assert r != '1/2-1/2'
+
         if r == '1-0':
             ww = 1
             bw = 0
         if r == '0-1':
             ww = 0
             bw = 1
-        sess.run(enqueue, feed_dict={X: w, Y: [ww] * len(w)})
-        sess.run(enqueue, feed_dict={X: b, Y: [bw] * len(b)})
+
+        if belikepro:
+            if ww == 1:
+                sess.run(enqueue, feed_dict={X: w, Y: [ww] * len(w)})
+                if np.random.rand() < 0.5:
+                    sess.run(enqueue, feed_dict={X: b, Y: [bw] * len(b)})
+            else:
+                if np.random.rand() < 0.5:
+                    sess.run(enqueue, feed_dict={X: w, Y: [ww] * len(w)})
+                sess.run(enqueue, feed_dict={X: b, Y: [bw] * len(b)})
+        else:
+            sess.run(enqueue, feed_dict={X: w, Y: [ww] * len(w)})
+            sess.run(enqueue, feed_dict={X: b, Y: [bw] * len(b)})
 
 
 def train(sess, train, coord, summaries, writer, global_step):
@@ -170,20 +190,18 @@ def train(sess, train, coord, summaries, writer, global_step):
 
 
 def build_net(X, histograms=False):
-    net = add_conv_layer(X, [3, 3, 256], 'conv1')
+    net = add_conv_layer(X, [3, 3], 256, 'conv1')
     net = tf.nn.elu(net)
     if histograms:
         tf.summary.histogram('conv_1', net)
 
     for i in range(8):
-        with tf.variable_scope('resnet_{}'.format(i+2)):
-            net = tf.contrib.layers.batch_norm(net, 0.99)
-            I = net
-            net = add_conv_layer(net, [3, 3, 256], 'conv_0')
-            net = tf.nn.elu(net)
-            net = add_conv_layer(net, [3, 3, 256], 'conv_1')
+        net = tf.contrib.layers.batch_norm(net, 0.99)
+        net = add_conv_layer(net, [3, 3], 256, 'conv{}_0'.format(i+2))
+        net = tf.nn.elu(net)
+        net = add_conv_layer(net, [3, 3], 256, 'conv{}_1'.format(i+2))
 
-            net = tf.nn.elu(net) + I
+        net = tf.nn.elu(net)
             # if histograms:
                 # tf.summary.histogram('conv_{}'.format(i+2), net)
 
@@ -217,7 +235,7 @@ def main():
                 tf.nn.sigmoid_cross_entropy_with_logits(value, L))
 
         abs_error = tf.reduce_mean(tf.abs(value - (L * 200 - 100)))
-        error = abs_error
+        error = entropy_error
         tf.summary.scalar("Error", error)
 
         accuracy = tf.reduce_mean(tf.cast(tf.greater(tf.sign(value) * tf.sign(L - 0.5), 0),
@@ -232,7 +250,7 @@ def main():
         delay = tf.Variable(MAX_DELAY, trainable=False)
         lr = tf.Variable(0.001, trainable=False)
         tf.summary.scalar("Learning_rate", lr)
-        opt = tf.train.GradientDescentOptimizer(lr)
+        opt = tf.train.RMSPropOptimizer(lr)
         gvs = opt.compute_gradients(error)
         tf.summary.scalar('gradient_norm', tf.global_norm(list(zip(*gvs))[0]))
 

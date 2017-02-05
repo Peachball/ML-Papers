@@ -15,18 +15,18 @@ def add_layer(l, out_dim, name, reuse=False, w_init=None, b_init=None,
         return tf.matmul(l, w) + b
 
 
-def add_conv_layer(l, filt_dim, name, strides=[1, 1], reuse=False, w_init=None,
+def add_conv_layer(l, filt_dim, out_channels, name, strides=[1, 1], reuse=None, w_init=None,
         b_init=None):
     '''
         filt_dim is of the shape [x, y, output channels]
     '''
     assert len(l.get_shape()) >= 4
-    assert len(filt_dim) == 3
+    assert len(filt_dim) == 2
     with tf.variable_scope(name, reuse=reuse) as scope:
         im_s = l.get_shape()
-        w_s = filt_dim[:2] + [im_s[-1]] + [filt_dim[-1]]
+        w_s = filt_dim + [im_s[-1]] + [out_channels]
         w = tf.get_variable("filter", shape=w_s, initializer=w_init)
-        b_s = [1, 1, 1, filt_dim[-1]]
+        b_s = [1, 1, 1, out_channels]
         b = tf.get_variable("b", shape=b_s, initializer=b_init)
         return tf.nn.conv2d(l, w, [1] + strides + [1], "SAME") + b
 
@@ -41,3 +41,21 @@ def flatten(l):
     for i in l.get_shape()[1:]:
         dim *= int(i)
     return tf.reshape(l, [-1, dim])
+
+
+def add_deconv_layer(l, filt_dim, out_channels, strides, name, reuse=None,
+        w_init=None, b_init=None):
+    assert len(filt_dim) == 2
+    assert len(l.get_shape()) == 4
+    with tf.variable_scope(name, reuse=reuse) as scope:
+        i_s = l.get_shape()
+        try:
+            batch_size = int(i_s[0])
+        except TypeError:
+            batch_size = -1
+        out_shape = [batch_size, strides[0] * int(i_s[1]), strides[1] * int(i_s[2]), out_channels]
+        w_s = filt_dim + [out_channels] + [l.get_shape()[-1]]
+        w = tf.get_variable("filt", shape=w_s, initializer=w_init)
+        b = tf.get_variable("b", shape=[1, 1, 1, out_channels],
+                initializer=b_init)
+        return tf.nn.conv2d_transpose(l, w, out_shape, [1] + strides + [1]) + b
