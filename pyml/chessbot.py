@@ -13,7 +13,7 @@ import requests
 def get_args():
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--logdir", default='tflogs/chess/copycat',
+    parser.add_argument("--logdir", default='tflogs/chess/sf',
             type=str, help="Location to store tensorflow logs")
 
     parser.add_argument("--batch_size", default=32, type=int,
@@ -32,8 +32,8 @@ def convert_to_array(board):
              'n' : 5}
 
     epd = board.epd().split(' ')[0]
-    white = np.zeros((8, 8))
-    black = np.zeros((8, 8))
+    white = np.zeros((8, 8)) + 12
+    black = np.zeros((8, 8)) + 12
 
     r = 7
     c = 0
@@ -61,11 +61,11 @@ def convert_to_array(board):
             c += 1
             continue
 
-    return (white, np.rot90(black, k=2))
+    return (white, np.fliplr(black))
 
 
 def play_self(sess, enqueue, X, Y, V, coord, verbose=False, log_dir=None,
-        copycat=True):
+        engine=None):
     SAVE_TIME = 0
     b = chess.Board()
     b.reset()
@@ -77,27 +77,21 @@ def play_self(sess, enqueue, X, Y, V, coord, verbose=False, log_dir=None,
     while not coord.should_stop():
         if b.is_game_over():
             r = b.result()
-            if '1/2-1/2':
-                print("Stalemate")
-            else:
-                if '1-0' == r:
-                    ww = 1
-                    bw = 0
-                if '0-1' == r:
-                    ww = 0
-                    bw = 1
-                print("Played game of length {}, {} won"
-                        .format(len(white_states), ww))
-                if not copycat:
-                    sess.run(enqueue, feed_dict={X: np.array(white_states),
-                        Y: [ww] * len(white_states)})
-                    sess.run(enqueue, feed_dict={X: np.array(black_states), Y:[bw] *
-                        len(black_states)})
-            if copycat:
-                sess.run(enqueue, feed_dict={X: np.array(white_states), Y: [0] *
-                    len(white_states)})
-                sess.run(enqueue, feed_dict={X: np.array(black_states), Y: [0] *
-                    len(black_states)})
+            if r == '1/2-1/2':
+                ww = 0
+                bw = 0
+            if '1-0' == r:
+                ww = 1
+                bw = 0
+            if '0-1' == r:
+                ww = 0
+                bw = 1
+            print("Played game of length {}, {}"
+                    .format(len(white_states), r))
+            sess.run(enqueue, feed_dict={X: np.array(white_states),
+                Y: [ww] * len(white_states)})
+            sess.run(enqueue, feed_dict={X: np.array(black_states), Y:[bw] *
+                len(black_states)})
 
             del white_states[:]
             del black_states[:]
@@ -111,7 +105,11 @@ def play_self(sess, enqueue, X, Y, V, coord, verbose=False, log_dir=None,
                 s_t = time.clock()
             b.reset()
 
-        def select_move(white=True, T=-1):
+        def select_move(white=True, T=-1, use_engine=False):
+            if use_engine and (not engine is None):
+                engine.position(b)
+                return engine.go()[0]
+
             moves = []
             for m in b.legal_moves:
                 moves.append(m)
@@ -128,9 +126,8 @@ def play_self(sess, enqueue, X, Y, V, coord, verbose=False, log_dir=None,
                 move_states[i] = b_array
                 i += 1
                 b.pop()
-            w_moves = sess.run(V, feed_dict={X: move_states}).squeeze(axis=1)
-            if verbose: print(w_moves)
 
+            w_moves = sess.run(V, feed_dict={X: move_states}).squeeze(axis=1)
             if T is not None:
                 if T > 0:
                     w_moves = np.exp(w_moves / T)
@@ -144,7 +141,7 @@ def play_self(sess, enqueue, X, Y, V, coord, verbose=False, log_dir=None,
             return moves[m_i]
 
         if b.turn:
-            curmove = select_move(b.turn, -1)
+            curmove = select_move(b.turn, use_engine=True)
             b.push(curmove)
             white, black = convert_to_array(b)
             white_states.append(white)
@@ -155,7 +152,7 @@ def play_self(sess, enqueue, X, Y, V, coord, verbose=False, log_dir=None,
             black_states.append(black)
 
 
-def data_loading_thread(sess, enqueue, X, Y, coord, belikepro=True):
+def data_loading_thread(sess, enqueue, X, Y, coord, belikepro=True, delay=5):
     gen = load_data()
     while not coord.should_stop():
         w, b, r = next(gen)
@@ -167,19 +164,13 @@ def data_loading_thread(sess, enqueue, X, Y, coord, belikepro=True):
         if r == '0-1':
             ww = 0
             bw = 1
-
         if belikepro:
-            if ww == 1:
-                sess.run(enqueue, feed_dict={X: w, Y: [ww] * len(w)})
-                if np.random.rand() < 0.5:
-                    sess.run(enqueue, feed_dict={X: b, Y: [bw] * len(b)})
-            else:
-                if np.random.rand() < 0.5:
-                    sess.run(enqueue, feed_dict={X: w, Y: [ww] * len(w)})
-                sess.run(enqueue, feed_dict={X: b, Y: [bw] * len(b)})
-        else:
-            sess.run(enqueue, feed_dict={X: w, Y: [ww] * len(w)})
-            sess.run(enqueue, feed_dict={X: b, Y: [bw] * len(b)})
+            ww = 1
+            bw = 1
+
+        sess.run(enqueue, feed_dict={X: w, Y: [ww] * len(w)})
+        sess.run(enqueue, feed_dict={X: b, Y: [bw] * len(b)})
+        time.sleep(5)
 
 
 def train(sess, train, coord, summaries, writer, global_step):
@@ -195,18 +186,22 @@ def build_net(X, histograms=False):
     if histograms:
         tf.summary.histogram('conv_1', net)
 
-    for i in range(8):
-        net = tf.contrib.layers.batch_norm(net, 0.99)
-        net = add_conv_layer(net, [3, 3], 256, 'conv{}_0'.format(i+2))
-        net = tf.nn.elu(net)
-        net = add_conv_layer(net, [3, 3], 256, 'conv{}_1'.format(i+2))
+    for i in range(20):
+        with tf.variable_scope("resnet{}".format(i)):
+            I = net
+            net = add_conv_layer(net, [3, 3], 256, 'conv{}_0'.format(i+2))
+            net = tf.contrib.layers.batch_norm(net, 0.99)
+            net = tf.nn.elu(net)
+            net = add_conv_layer(net, [3, 3], 256, 'conv{}_1'.format(i+2))
+            net = tf.contrib.layers.batch_norm(net, 0.99)
 
-        net = tf.nn.elu(net)
-            # if histograms:
-                # tf.summary.histogram('conv_{}'.format(i+2), net)
+            net = tf.nn.elu(net) + I
+                # if histograms:
+                    # tf.summary.histogram('conv_{}'.format(i+2), net)
 
     net = flatten(net)
-    net = add_layer(net, 1, 'fc')
+    features = net
+    net = add_layer(features, 1, 'fc')
     if histograms:
         tf.summary.histogram('output_value', net)
     return net
@@ -222,20 +217,22 @@ def main():
         enqueue_op = data_queue.enqueue_many([X, tf.expand_dims(L_d, axis=1)])
         B, L = data_queue.dequeue_many(args.batch_size)
 
-    converted_board = tf.one_hot(B, 12)
+    converted_board = tf.one_hot(B, 13)
 
     with tf.variable_scope("valuenet") as scope:
-        value = build_net(converted_board, histograms=True)
+        value= build_net(converted_board, histograms=True)
 
     with tf.variable_scope("valuenet", reuse=True):
-        quick_v = build_net(tf.one_hot(X, 12))
+        quick_v= build_net(tf.one_hot(X, 13))
 
     with tf.name_scope('metrics'):
         entropy_error = tf.reduce_mean(
                 tf.nn.sigmoid_cross_entropy_with_logits(value, L))
 
         abs_error = tf.reduce_mean(tf.abs(value - (L * 200 - 100)))
-        error = entropy_error
+        regularizer = tf.add_n([tf.nn.l2_loss(v) for v in
+            tf.trainable_variables() if not "bias" in v.name]) * 0.001
+        error = entropy_error + regularizer
         tf.summary.scalar("Error", error)
 
         accuracy = tf.reduce_mean(tf.cast(tf.greater(tf.sign(value) * tf.sign(L - 0.5), 0),
@@ -248,9 +245,9 @@ def main():
     with tf.name_scope("gradients"):
         MAX_DELAY = 200
         delay = tf.Variable(MAX_DELAY, trainable=False)
-        lr = tf.Variable(0.001, trainable=False)
+        lr = tf.Variable(0.003, trainable=False)
         tf.summary.scalar("Learning_rate", lr)
-        opt = tf.train.RMSPropOptimizer(lr)
+        opt = tf.train.GradientDescentOptimizer(lr)
         gvs = opt.compute_gradients(error)
         tf.summary.scalar('gradient_norm', tf.global_norm(list(zip(*gvs))[0]))
 
@@ -262,15 +259,15 @@ def main():
         prev_error = tf.Variable(10.0)
         tf.summary.scalar("shadow_error", ema.average(error))
 
-        new_lr, new_delay, new_error = lr, delay, prev_error
-        # tf.cond(delay > 0,
-                # lambda: [lr, delay-1, prev_error],
-                # lambda: [
-                    # tf.cond(ema.average(error) > 0.95 * prev_error,
-                        # lambda: lr/2.0,
-                        # lambda: lr),
-                    # tf.Variable(MAX_DELAY, trainable=False),
-                    # ema.average(error)])
+        # lr, delay, prev_error
+        new_lr, new_delay, new_error = tf.cond(delay > 0,
+                lambda: [lr, delay-1, prev_error],
+                lambda: [
+                    tf.cond(ema.average(error) > 0.95 * prev_error,
+                        lambda: lr/2.0,
+                        lambda: lr),
+                    tf.Variable(MAX_DELAY, trainable=False),
+                    ema.average(error)])
         reduce_lr = tf.group(
                 tf.assign(lr, new_lr),
                 tf.assign(delay, new_delay),
@@ -294,12 +291,14 @@ def main():
             writer.add_graph(sess.graph, global_step=global_step.eval())
 
         t = []
-        # t = [threading.Thread(target=play_self,
-            # args=(sess, enqueue_op, X, L_d, quick_v, coord)) for i in range(7)]
+        t = [threading.Thread(target=play_self,
+            args=(sess, enqueue_op, X, L_d, quick_v, coord), kwargs={'engine':
+                load_engine()}) for i in range(7)]
         t.append(threading.Thread(target=play_self, args=(sess, enqueue_op, X,
-            L_d, quick_v, coord), kwargs={"log_dir": "chesslogs"}))
-        t.append(threading.Thread(target=data_loading_thread, args=(sess,
-            enqueue_op, X, L_d, coord)))
+            L_d, quick_v, coord), kwargs={"log_dir": "chesslogs", "engine":
+                load_engine()}))
+        # t.append(threading.Thread(target=data_loading_thread, args=(sess,
+            # enqueue_op, X, L_d, coord)))
         train_thread = threading.Thread(target=train,
                 args=(sess, train_op, coord, summary_op, writer, global_step))
 
@@ -310,6 +309,7 @@ def main():
         while True:
             try:
                 time.sleep(10)
+                print("Data queue size:", sess.run(data_queue.size()))
                 saver.save(sess, os.path.join(args.logdir, "model"),
                         global_step=global_step.eval())
             except:
@@ -369,7 +369,7 @@ def _unzip_dir(data_dir=None):
             print("Unable to unzip file: {}".format(filename))
 
 
-def load_data(data_dir=None, stalemates=False):
+def load_data(data_dir=None):
     from chess import pgn
     if data_dir is None:
         data_dir = '/home/peachball/D/git/ML-Papers/datasets/chess/pgn'
@@ -417,6 +417,14 @@ def load_data(data_dir=None, stalemates=False):
                 del white_states[:]
                 del black_states[:]
                 game = read_game(handler)
+
+
+def load_engine(location="./stockfish_8_x64"):
+    from chess import uci
+    engine = uci.popen_engine(location)
+    engine.uci()
+
+    return engine
 
 
 if __name__ == '__main__':
