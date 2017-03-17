@@ -181,19 +181,19 @@ def train(sess, train, coord, summaries, writer, global_step):
 
 
 def build_net(X, histograms=False):
-    net = add_conv_layer(X, [3, 3], 256, 'conv1')
+    net = add_conv_layer(X, [3, 3], 128, 'conv1')
     net = tf.nn.elu(net)
     if histograms:
         tf.summary.histogram('conv_1', net)
 
-    for i in range(20):
+    for i in range(3):
         with tf.variable_scope("resnet{}".format(i)):
             I = net
-            net = add_conv_layer(net, [3, 3], 256, 'conv{}_0'.format(i+2))
-            net = tf.contrib.layers.batch_norm(net, 0.99)
+            net = add_conv_layer(net, [3, 3], 128, 'conv{}_0'.format(i+2))
+            # net = tf.contrib.layers.batch_norm(net, 0.99)
             net = tf.nn.elu(net)
-            net = add_conv_layer(net, [3, 3], 256, 'conv{}_1'.format(i+2))
-            net = tf.contrib.layers.batch_norm(net, 0.99)
+            net = add_conv_layer(net, [3, 3], 128, 'conv{}_1'.format(i+2))
+            # net = tf.contrib.layers.batch_norm(net, 0.99)
 
             net = tf.nn.elu(net) + I
                 # if histograms:
@@ -206,6 +206,11 @@ def build_net(X, histograms=False):
         tf.summary.histogram('output_value', net)
     return net
 
+def get_model_params(X, L, cpu=0):
+    device = '/cpu:{}'.format(cpu)
+    with tf.device(device):
+        with tf.variable_scope('valuenet', reuse=True):
+            return build_net(tf.one_hot(X, 13))
 
 def main():
     args = get_args()
@@ -219,15 +224,15 @@ def main():
 
     converted_board = tf.one_hot(B, 13)
 
-    with tf.variable_scope("valuenet") as scope:
-        value= build_net(converted_board, histograms=True)
+    with tf.device('/gpu:0'):
+        with tf.variable_scope("valuenet") as scope:
+            value = build_net(tf.stop_gradient(converted_board), histograms=True)
 
-    with tf.variable_scope("valuenet", reuse=True):
-        quick_v= build_net(tf.one_hot(X, 13))
+    q_vs = [get_model_params(X, L_d, cpu=i) for i in range(8)]
 
     with tf.name_scope('metrics'):
         entropy_error = tf.reduce_mean(
-                tf.nn.sigmoid_cross_entropy_with_logits(value, L))
+                tf.nn.sigmoid_cross_entropy_with_logits(logits=value, labels=L))
 
         abs_error = tf.reduce_mean(tf.abs(value - (L * 200 - 100)))
         regularizer = tf.add_n([tf.nn.l2_loss(v) for v in
@@ -242,46 +247,51 @@ def main():
     global_step = tf.Variable(0, trainable=False)
 
     coord = tf.train.Coordinator()
-    with tf.name_scope("gradients"):
-        MAX_DELAY = 200
-        delay = tf.Variable(MAX_DELAY, trainable=False)
-        lr = tf.Variable(0.003, trainable=False)
-        tf.summary.scalar("Learning_rate", lr)
-        opt = tf.train.GradientDescentOptimizer(lr)
-        gvs = opt.compute_gradients(error)
-        tf.summary.scalar('gradient_norm', tf.global_norm(list(zip(*gvs))[0]))
+    with tf.device('/gpu:0'):
+        with tf.name_scope("gradients"):
+            MAX_DELAY = 200
+            delay = tf.Variable(MAX_DELAY, trainable=False)
+            lr = tf.Variable(0.003, trainable=False)
+            tf.summary.scalar("Learning_rate", lr)
+            opt = tf.train.GradientDescentOptimizer(lr)
+            gvs = opt.compute_gradients(error)
+            tf.summary.scalar('gradient_norm', tf.global_norm(list(zip(*gvs))[0]))
 
-        clipped_gvs = [(tf.clip_by_norm(g, 5.0), v) for g, v in gvs]
-        grad_descent_op = opt.apply_gradients(clipped_gvs, global_step=global_step)
+            clipped_gvs = [(tf.clip_by_norm(g, 5.0), v) for g, v in gvs]
+            grad_descent_op = opt.apply_gradients(clipped_gvs, global_step=global_step)
 
-        ema = tf.train.ExponentialMovingAverage(0.99)
-        maintain_averages = ema.apply([error])
-        prev_error = tf.Variable(10.0)
-        tf.summary.scalar("shadow_error", ema.average(error))
+            ema = tf.train.ExponentialMovingAverage(0.99)
+            maintain_averages = ema.apply([error])
+            prev_error = tf.Variable(10.0)
+            tf.summary.scalar("shadow_error", ema.average(error))
 
-        # lr, delay, prev_error
-        new_lr, new_delay, new_error = tf.cond(delay > 0,
-                lambda: [lr, delay-1, prev_error],
-                lambda: [
-                    tf.cond(ema.average(error) > 0.95 * prev_error,
-                        lambda: lr/2.0,
-                        lambda: lr),
-                    tf.Variable(MAX_DELAY, trainable=False),
-                    ema.average(error)])
-        reduce_lr = tf.group(
-                tf.assign(lr, new_lr),
-                tf.assign(delay, new_delay),
-                tf.assign(prev_error, new_error))
+            # lr, delay, prev_error
+            new_lr, new_delay, new_error = tf.cond(delay > 0,
+                    lambda: [lr, delay-1, prev_error],
+                    lambda: [
+                        tf.cond(ema.average(error) > 0.95 * prev_error,
+                            lambda: lr/2.0,
+                            lambda: lr),
+                        tf.Variable(MAX_DELAY, trainable=False),
+                        ema.average(error)])
+            reduce_lr = tf.group(
+                    tf.assign(lr, new_lr),
+                    tf.assign(delay, new_delay),
+                    tf.assign(prev_error, new_error))
 
-        with tf.control_dependencies([grad_descent_op]):
-            train_op = tf.group(maintain_averages, reduce_lr)
+            with tf.control_dependencies([grad_descent_op]):
+                train_op = tf.group(maintain_averages, reduce_lr)
 
+    config = tf.ConfigProto(device_count={'CPU': 8, 'GPU': 1},
+            inter_op_parallelism_threads=8,
+            intra_op_parallelism_threads=1,
+            allow_soft_placement=True)
     init_op = tf.global_variables_initializer()
     summary_op = tf.summary.merge_all()
     writer = tf.summary.FileWriter(args.logdir)
     saver = tf.train.Saver()
 
-    with tf.Session() as sess:
+    with tf.Session(config=config) as sess:
         ckpt = tf.train.latest_checkpoint(args.logdir)
         try:
             saver.restore(sess, ckpt)
@@ -292,10 +302,10 @@ def main():
 
         t = []
         t = [threading.Thread(target=play_self,
-            args=(sess, enqueue_op, X, L_d, quick_v, coord), kwargs={'engine':
-                load_engine()}) for i in range(7)]
+            args=(sess, enqueue_op, X, L_d, v, coord),
+            kwargs={'engine': load_engine()}) for v in q_vs[:-1]]
         t.append(threading.Thread(target=play_self, args=(sess, enqueue_op, X,
-            L_d, quick_v, coord), kwargs={"log_dir": "chesslogs", "engine":
+            L_d, q_vs[-1], coord), kwargs={"log_dir": "chesslogs", "engine":
                 load_engine()}))
         # t.append(threading.Thread(target=data_loading_thread, args=(sess,
             # enqueue_op, X, L_d, coord)))
