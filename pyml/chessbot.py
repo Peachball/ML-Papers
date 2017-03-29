@@ -181,23 +181,23 @@ def train(sess, train, coord, summaries, writer, global_step):
 
 
 def build_net(X, histograms=False):
-    net = add_conv_layer(X, [3, 3], 128, 'conv1')
+    net = add_conv_layer(X, [3, 3], 64, 'conv1')
     net = tf.nn.elu(net)
     if histograms:
         tf.summary.histogram('conv_1', net)
 
     for i in range(3):
-        with tf.variable_scope("resnet{}".format(i)):
-            I = net
-            net = add_conv_layer(net, [3, 3], 128, 'conv{}_0'.format(i+2))
-            # net = tf.contrib.layers.batch_norm(net, 0.99)
-            net = tf.nn.elu(net)
-            net = add_conv_layer(net, [3, 3], 128, 'conv{}_1'.format(i+2))
-            # net = tf.contrib.layers.batch_norm(net, 0.99)
+        # with tf.variable_scope("resnet{}".format(i)):
+        # I = net
+        net = add_conv_layer(net, [3, 3], 64, 'conv{}_0'.format(i+2))
+        # net = tf.contrib.layers.batch_norm(net, 0.99)
+        net = tf.nn.elu(net)
+        net = add_conv_layer(net, [3, 3], 64, 'conv{}_1'.format(i+2))
+        # net = tf.contrib.layers.batch_norm(net, 0.99)
 
-            net = tf.nn.elu(net) + I
-                # if histograms:
-                    # tf.summary.histogram('conv_{}'.format(i+2), net)
+        net = tf.nn.elu(net)
+            # if histograms:
+                # tf.summary.histogram('conv_{}'.format(i+2), net)
 
     net = flatten(net)
     features = net

@@ -1,18 +1,29 @@
 import tensorflow as tf
 
 def add_layer(l, out_dim, name, reuse=False, w_init=None, b_init=None,
-        collections=None):
+        collections=None, biases=True):
     '''
         out_dim is a scalar
     '''
     with tf.variable_scope(name, reuse=reuse):
         l_s = l.get_shape()
         w = tf.get_variable("w", shape=[l_s[1], out_dim], initializer=w_init)
-        b = tf.get_variable("bias", shape=[out_dim], initializer=b_init)
+        if biases:
+            b = tf.get_variable("bias", shape=[out_dim], initializer=b_init)
         if collections:
             tf.add_to_collection(collection, w)
             tf.add_to_collection(collection, b)
-        return tf.matmul(l, w) + b
+        if biases:
+            return tf.matmul(l, w) + b
+        else:
+            return tf.matmul(l, w)
+
+
+def add_layer_batch(l, out_dim, name, reuse=False, w_init=None, b_init=None):
+    raise NotImplementedError()
+    with tf.variable_scope(name, reuse=reuse):
+        s_t = tf.shape(l)
+        a_s = l.get_shape()
 
 
 def add_conv_layer(l, filt_dim, out_channels, name, strides=[1, 1], reuse=None, w_init=None,
@@ -37,6 +48,9 @@ def max_pool(l, pdim):
 
 
 def flatten(l):
+    """
+        Note: for images only
+    """
     dim = 1
     shape = l.get_shape().as_list()
     for i in shape[1:]:
@@ -61,3 +75,7 @@ def add_deconv_layer(l, filt_dim, out_channels, strides, name, reuse=None,
         b = tf.get_variable("bias", shape=[1, 1, 1, out_channels],
                 initializer=b_init)
         return tf.nn.conv2d_transpose(l, w, out_shape, [1] + strides + [1]) + b
+
+
+def clip_gvs(gvs, magnitude, clipping_func=tf.clip_by_norm):
+    return [(clipping_func(g, magnitude), v) for (g, v) in gvs if g is not None]

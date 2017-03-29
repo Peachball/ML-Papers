@@ -278,12 +278,12 @@ class FeudalNet():
                 )[::-1]
 
             # Convert intrinisc reward back into [batch, timestep]
-            intrinsic_reward = tf.transpose(intrinsic_reward, [1, 0])
+            intrinsic_reward = tf.check_numerics(
+                    tf.transpose(intrinsic_reward, [1, 0]), "Intrinsic reward")
 
-            value_error = tf.reduce_sum( tf.squared_difference(
+            value_error = tf.reduce_sum(tf.squared_difference(
                 self.rewards + tf.stop_gradient(
-                    self.ir_influence * intrinsic_reward),
-                v))
+                    self.ir_influence * intrinsic_reward), v))
             if type(self.output_space) is gym.spaces.MultiDiscrete:
                 h = self.output_space.high
                 l = self.output_space.low
@@ -307,8 +307,10 @@ class FeudalNet():
                 prob = tf.nn.softmax(p)
                 expanded_label = tf.one_hot(self.action, self.output_space.n)
                 policy_error = tf.reduce_sum(
-                        (self.rewards + tf.stop_gradient(intrinsic_reward - v)) *
-                        tf.log(tf.reduce_sum(expanded_label * prob, axis=-1)))
+                        tf.stop_gradient(
+                            self.rewards + self.ir_influence * intrinsic_reward - v) *
+                        tf.log(tf.reduce_sum(expanded_label * prob, axis=-1) +
+                            1e-8))
 
             if prob is None:
                 raise NotImplementedError()
@@ -332,7 +334,7 @@ class FeudalNet():
                     tf.summary.scalar("manager_value_error", manager_value_error),
                     tf.summary.scalar("worker_value_error", value_error)
                 ])
-            opt = tf.train.GradientDescentOptimizer(1e-10)
+            opt = tf.train.GradientDescentOptimizer(1e-5)
             p_opt = self._get_train_op(
                     tf.check_numerics(policy_error, "worker policy"),
                     opt)
@@ -351,7 +353,10 @@ class FeudalNet():
                 raise NotImplementedError("Did not build MultiDiscrete yet")
             self._value_ops[device] = [v, v_m]
             self._states[device] = [w_state, m_state]
-            self._train_ops[device] = [p_opt, v_opt, m_opt, vm_opt]
+            self._train_ops[device] = [
+                    p_opt,
+                    v_opt,
+                    m_opt, vm_opt]
             return self._train_ops[device]
 
     def _get_train_op(self, target, optimizer):
@@ -374,11 +379,11 @@ class FeudalNet():
         self.train_op()
         return self._states[device]
 
-    def _cos(self, t1, t2):
+    def _cos(self, t1, t2, epsilon=1e-8):
         assert len(t1.get_shape()) == len(t2.get_shape())
         prod = tf.matmul(t1, t2, transpose_b=True)
-        mag1 = tf.sqrt(tf.reduce_sum(tf.square(t1), axis=-1))
-        mag2 = tf.sqrt(tf.reduce_sum(tf.square(t2), axis=-1))
+        mag1 = tf.sqrt(tf.reduce_sum(tf.square(t1), axis=-1) + epsilon)
+        mag2 = tf.sqrt(tf.reduce_sum(tf.square(t2), axis=-1) + epsilon)
         normalized = tf.reduce_sum(prod, axis=-1) / (mag1 * mag2)
         return normalized
 
@@ -656,7 +661,7 @@ def run_A2C():
                 sw.add_summary(s)
                 print("Value Error: {}\nPolicy Error: {}".format(ve, pe))
                 if time.clock() - save_interval > args.save_interval:
-                    saver.save(sess, 
+                    saver.save(sess,
                             os.path.join(args.logdir, 'model'),
                             global_step=global_step.eval())
             except KeyboardInterrupt:
@@ -734,6 +739,8 @@ def trainer(model, sess, sw, env, coord, device, gs):
         for r_t in rewards[::-1]:
             total_reward += [model.discount * R + r_t]
         total_reward = np.array(total_reward[::-1])
+        print("Total Reward: {}\nGame Length: {}"
+                .format(sum(rewards), len(rewards)))
 
 
         # Training with sequence lengths of 400
@@ -762,11 +769,12 @@ def trainer(model, sess, sw, env, coord, device, gs):
 def run_feudal():
     OUTPUT_LOG_DIR="tflogs/fun"
     ENV="Pong-v0"
+    CPU_CORES = 8
     # import ppaquette_gym_doom
     env = gym.make(ENV)
     global_step = tf.Variable(0, name="global_step")
     m = FeudalNet.from_env(env)
-    [m.train_op("/cpu:{}".format(i)) for i in range(8)] # Initialize train ops
+    [m.train_op("/cpu:{}".format(i)) for i in range(CPU_CORES)] # Initialize train ops
     sw = tf.summary.FileWriter(OUTPUT_LOG_DIR)
     coord = tf.train.Coordinator()
     saver = tf.train.Saver()
@@ -784,7 +792,7 @@ def run_feudal():
             print("Did not init previous checkpoint")
             sw.add_graph(sess.graph)
 
-        envs = [gym.make(ENV) for i in range(8)]
+        envs = [gym.make(ENV) for i in range(CPU_CORES)]
         train_threads = [threading.Thread(
             target=trainer,
             args=(m, sess, sw, e, coord, '/cpu:{}'.format(i), global_step))
