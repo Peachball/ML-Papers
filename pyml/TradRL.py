@@ -202,7 +202,8 @@ class A2C(Model):
 
 class FeudalNet():
     def __init__(self, input_space, output_space, horizon=64, goal_size=16,
-            intrinsic_reward_influence=0.5, discount_factor=0.99):
+            intrinsic_reward_influence=0.5, discount_factor=0.99,
+            entropy_regularization=0.01):
         self.output_space = output_space
         self.input_space = input_space
         output_dim = None
@@ -239,10 +240,11 @@ class FeudalNet():
 
         self.game_length = tf.placeholder(tf.float32, shape=())
         self.total_reward = tf.placeholder(tf.float32, shape=())
-        self.game_summaries = tf.summary.merge([
-                tf.summary.scalar("Game Length", self.game_length),
-                tf.summary.scalar("Total reward", self.total_reward)])
+        # self.game_summaries = tf.summary.merge([
+                # tf.summary.scalar("Game Length", self.game_length),
+                # tf.summary.scalar("Total reward", self.total_reward)])
         self.discount = discount_factor
+        self.entropy_reg = entropy_regularization
 
         self.train_op()
 
@@ -254,6 +256,8 @@ class FeudalNet():
         self.initialized += [device]
 
         with tf.device(device):
+            if device not in self.summaries:
+                self.summaries[device] = []
             p, [g, s], [v, v_m], [w_state, m_state] = self._build_net(self.input)
             prob = None
             expanded_label = None
@@ -300,17 +304,19 @@ class FeudalNet():
                         axis=-1)
                 log_prob = tf.concat([tf.log(tf.reduce_sum(r * l, axis=-1))
                     for r, l in zip(ranges, labels)], axis=-1)
-                policy_error = tf.reduce_mean(
+                policy_error = tf.reduce_sum(
                         -(self.rewards + tf.stop_gradient(self.ir_influence * intrinsic_reward - v)) *
                         tf.reduce_sum(log_prob, axis=-1))
             if type(self.output_space) is gym.spaces.Discrete:
                 prob = tf.nn.softmax(p)
+                entropy = tf.reduce_sum(-prob * tf.log(prob + 1e-8))
+                self.summaries[device] += [tf.summary.scalar("model/entropy", entropy)]
                 expanded_label = tf.one_hot(self.action, self.output_space.n)
                 policy_error = tf.reduce_sum(
-                        tf.stop_gradient(
+                        -tf.stop_gradient(
                             self.rewards + self.ir_influence * intrinsic_reward - v) *
                         tf.log(tf.reduce_sum(expanded_label * prob, axis=-1) +
-                            1e-8))
+                            1e-8)) - entropy * self.entropy_reg
 
             if prob is None:
                 raise NotImplementedError()
@@ -318,7 +324,7 @@ class FeudalNet():
             #[i, g, s, adv]
             manager_error = tf.scan(lambda a, pi: tf.cond(
                     tf.greater(tf.shape(time_s)[0], self.horizon + pi[0]),
-                    lambda: tf.reduce_mean(pi[3] * self._cos(
+                    lambda: -tf.reduce_mean(pi[3] * self._cos(
                         time_s[pi[0] + self.horizon] - pi[2],
                         pi[1])),
                     lambda: tf.constant(0, dtype=tf.float32)),
@@ -328,44 +334,44 @@ class FeudalNet():
             manager_value_error = tf.reduce_sum(
                     tf.squared_difference(self.rewards, v_m))
 
-            self.summaries[device] = tf.summary.merge([
-                    tf.summary.scalar("worker_policy_error", policy_error),
-                    tf.summary.scalar("manager_error", manager_error),
-                    tf.summary.scalar("manager_value_error", manager_value_error),
-                    tf.summary.scalar("worker_value_error", value_error)
-                ])
-            opt = tf.train.GradientDescentOptimizer(1e-5)
-            p_opt = self._get_train_op(
-                    tf.check_numerics(policy_error, "worker policy"),
-                    opt)
-            v_opt = self._get_train_op(
-                    tf.check_numerics(value_error, "worker value"),
-                    opt)
-            m_opt = self._get_train_op(
-                    tf.check_numerics(manager_error, "manager cos"),
-                    opt)
-            vm_opt = self._get_train_op(
-                    tf.check_numerics(manager_value_error, "Manager value nan"),
-                    opt)
-            if type(self.output_space) is gym.spaces.Discrete:
-                self._action_ops[device] = [tf.nn.softmax(p), w_state, m_state]
+            self.summaries[device] += [
+                    tf.summary.scalar("worker/policy error", policy_error),
+                    tf.summary.scalar("worker/value error", value_error),
+                    tf.summary.scalar("manager/error", manager_error),
+                    tf.summary.scalar("manager/value error",
+                        manager_value_error)
+                ]
+            reuse = getattr(self, '_init_optimizer', False)
+            self._init_optimizer = True
+            opt = tf.train.AdamOptimizer(1e-4)
+            # r_opt = tf.train.RMSPropOptimizer(1e-5, epsilon=0.1)
+            train_op = self._get_train_op(policy_error +
+                    0.25 * value_error +
+                    manager_error +
+                    0.25 * manager_value_error,
+                    opt, reuse=reuse)
+            # p_opt = self._get_train_op(policy_error, opt)
+            # v_opt = self._get_train_op(value_error, opt)
+            # m_opt = self._get_train_op(manager_error, opt)
+            # vm_opt = self._get_train_op(manager_value_error, opt)
+            if prob is not None:
+                self._action_ops[device] = [prob, w_state, m_state]
             else:
                 raise NotImplementedError("Did not build MultiDiscrete yet")
             self._value_ops[device] = [v, v_m]
             self._states[device] = [w_state, m_state]
-            self._train_ops[device] = [
-                    p_opt,
-                    v_opt,
-                    m_opt, vm_opt]
+            self._train_ops[device] = [train_op]
+            self.summaries[device] = tf.summary.merge(self.summaries[device])
             return self._train_ops[device]
 
-    def _get_train_op(self, target, optimizer):
-        gvs = optimizer.compute_gradients(target)
-        clipped_gvs = [(tf.clip_by_norm(g, 5), v)
-                for g, v in gvs if g is not None]
-        train_op = optimizer.apply_gradients(clipped_gvs,
-                global_step=tf.train.get_global_step())
-        return train_op
+    def _get_train_op(self, target, optimizer, reuse=None):
+        with tf.variable_scope("gradients", reuse=reuse):
+            gvs = optimizer.compute_gradients(target)
+            clipped_gvs = [(tf.clip_by_norm(g, 5), v)
+                    for g, v in gvs if g is not None]
+            train_op = optimizer.apply_gradients(clipped_gvs,
+                    global_step=tf.train.get_global_step())
+            return train_op
 
     def get_value_op(self, device='/cpu:0'):
         if device in self._value_ops:
@@ -479,6 +485,7 @@ class FeudalNet():
     def perception_function(self, inp):
         if len(inp.get_shape()) == 4:
             net = tf.image.resize_images(inp, [128, 128])
+            tf.summary.image(net)
             net = add_conv_layer(net, [8, 8], 16, "conv1", strides=[4, 4])
             net = tf.nn.elu(net)
             net = add_conv_layer(net, [8, 8], 32, "conv2", strides=[4, 4])
@@ -508,8 +515,13 @@ class FeudalNet():
         """
             Assumes input is of the form: [batch size, time steps, features]
         """
+        reuse = False
+        if hasattr(self, '_init_manager_rnn'):
+            reuse = True
+        self._init_manager_rnn = True
         with tf.variable_scope("manager_rnn"):
-            lstm = tf.contrib.rnn.LSTMCell(self.goal_size, use_peepholes=True)
+            lstm = tf.contrib.rnn.LSTMCell(self.goal_size, use_peepholes=True,
+                    reuse=reuse)
             self.manager_init_state = lstm.zero_state(batch_size, tf.float32)
             outputs, state = tf.nn.dynamic_rnn(lstm, inp, dtype=tf.float32,
                     initial_state=self.manager_init_state)
@@ -521,6 +533,10 @@ class FeudalNet():
         """
             Assumes input is of the form: [batch size, time steps, features]
         """
+        reuse = False
+        if hasattr(self, '_init_worker_rnn'):
+            reuse = True
+        self._init_worker_rnn = True
         output_size = None
         if type(self.output_space) is gym.spaces.MultiDiscrete:
             output_size = (self.output_space.high - self.output_space.low).sum()
@@ -531,7 +547,8 @@ class FeudalNet():
             raise NotImplementedError(
                     "Unable to handle non discrete output spaces")
         with tf.variable_scope("worker_rnn"):
-            lstm = tf.contrib.rnn.LSTMCell(output_size * self.goal_size, use_peepholes=True)
+            lstm = tf.contrib.rnn.LSTMCell(output_size * self.goal_size,
+                    use_peepholes=True, reuse=reuse)
             self.worker_init_state = lstm.zero_state(batch_size, tf.float32)
             output, state = tf.nn.dynamic_rnn(lstm, inp, dtype=tf.float32,
                     initial_state=self.worker_init_state)
@@ -700,11 +717,13 @@ def trainer(model, sess, sw, env, coord, device, gs):
         states = []
         rewards = []
         actions = []
+        int_states = []
         done = False
         w_s = None
         m_s = None
         r = 0
         while not done and not coord.should_stop():
+            int_states += [(w_s, m_s)]
             if w_s is None:
                 [p, w_s, m_s] = sess.run(model.get_action(device=device),
                         feed_dict={model.input: o[None,None]})
@@ -729,12 +748,10 @@ def trainer(model, sess, sw, env, coord, device, gs):
                                model.manager_init_state: m_s})[0].squeeze()
 
         # Store summaries
-        s = sess.run(model.game_summaries,
-                feed_dict={
-                    model.game_length: len(rewards),
-                    model.total_reward: sum(rewards)
-                    })
-        sw.add_summary(s, global_step=sess.run(gs))
+        game_summaries = tf.Summary()
+        game_summaries.value.add(tag="game_length", simple_value=len(rewards))
+        game_summaries.value.add(tag="total_reward", simple_value=sum(rewards))
+        sw.add_summary(game_summaries, global_step=sess.run(gs))
 
         for r_t in rewards[::-1]:
             total_reward += [model.discount * R + r_t]
@@ -744,8 +761,6 @@ def trainer(model, sess, sw, env, coord, device, gs):
 
 
         # Training with sequence lengths of 400
-        w_s = None
-        m_s = None
         s_m = np.array(states)
         a_m = np.array(actions)
         for i in range(0, len(s_m), MAX_SEQUENCE_LENGTH):
@@ -755,11 +770,12 @@ def trainer(model, sess, sw, env, coord, device, gs):
                     model.rewards: total_reward[None,i:end],
                     model.action: a_m[None,i:end],
                     }
+            w_s, m_s = int_states[i]
             if w_s is not None:
                 feed_dict.update({
                     model.worker_init_state: w_s,
                     model.manager_init_state: m_s})
-            _, [_, w_s, m_s], s  = sess.run([
+            _, _, s  = sess.run([
                 model.train_op(device=device),
                 model.get_action(device=device),
                 model.summaries[device]],
