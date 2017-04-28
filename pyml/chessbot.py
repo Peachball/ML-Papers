@@ -10,12 +10,21 @@ import os
 import requests
 import random
 import os
+import sys
+from PIL import Image, ImageTk
+import cairosvg
+import io
+
+try:
+    import tkinter as tk
+except ImportError:
+    import Tkinter as tk
 
 
 def get_args():
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--logdir", default='tflogs/chess/temporaldiff',
+    parser.add_argument("--logdir", default='tflogs/chess/bglf',
             type=str, help="Location to store tensorflow logs")
 
     parser.add_argument("--batch_size", default=32, type=int,
@@ -83,11 +92,11 @@ def play_self(sess, enqueue, X, Y, V, coord, W, verbose=False, log_dir=None,
                 ww = 0
                 bw = 0
             if '1-0' == r:
-                ww = 100
-                bw = -100
+                ww = 10
+                bw = -10
             if '0-1' == r:
-                ww = -100
-                bw = 100
+                ww = -10
+                bw = 10
             print("Played game of length {}, {}"
                     .format(len(white_states), r))
             w_vals = np.concatenate((
@@ -98,7 +107,7 @@ def play_self(sess, enqueue, X, Y, V, coord, W, verbose=False, log_dir=None,
                     np.array(bw)[None]))
             if sw is not None:
                 game_summary = tf.Summary(
-                        value=[tf.Summary.Value(tag="Game length",
+                        value=[tf.Summary.Value(tag="metrics/Game length",
                             simple_value=len(white_states))])
                 sw.add_summary(game_summary)
             sess.run(enqueue, feed_dict={X: np.array(white_states), Y: w_vals,
@@ -234,29 +243,45 @@ def data_loading_thread(sess, enqueue, X, Y, coord, belikepro=True, delay=5):
 
 
 def train(sess, train, coord, summaries, writer, global_step):
+    p_time = time.clock()
     while not coord.should_stop():
-        _, s = sess.run([train, summaries])
-        writer.add_summary(s, sess.run(global_step))
-        writer.flush()
+        _, s, g = sess.run([train, summaries, global_step])
+        writer.add_summary(s, g)
+        if g % 100 == 0:
+            writer.add_summary(tf.Summary(value=[tf.Summary.Value(
+                tag="model/time_per_100",
+                simple_value=(time.clock() - p_time))]), g)
+            p_time = time.clock()
 
 
 def build_net(X, histograms=False):
-    net = add_conv_layer(X, [3, 3], 64, 'conv1')
+    WIDTH=64
+    net = add_conv_layer(X, [5, 5], WIDTH, 'conv1')
     net = tf.nn.elu(net)
     if histograms:
         tf.summary.histogram('conv_1', net)
 
-    for i in range(15):
+    for i in range(10):
         with tf.variable_scope("resnet{}".format(i)):
             I = net
-            net = add_conv_layer(net, [3, 3], 64, 'conv{}_0'.format(i+2))
-            net = tf.contrib.layers.batch_norm(net, 0.99)
+            # net = tf.contrib.layers.batch_norm(net, 0.99)
+            net = add_conv_layer(net, [5, 5], WIDTH, 'conv{}_0'.format(i+2))
+            if histograms:
+                batch_sum = tf.reduce_sum(
+                        tf.cast(tf.greater(net, 0), tf.float32), axis=0)
+                tf.summary.scalar("conv{}_0_dead".format(i + 2),
+                        1 - tf.reduce_mean(tf.cast(tf.greater(batch_sum, 0), tf.float32)))
             net = tf.nn.elu(net)
             if histograms:
                 tf.summary.histogram("conv{}_0".format(i + 2), net)
-            net = add_conv_layer(net, [3, 3], 64, 'conv{}_1'.format(i+2))
-            net = tf.contrib.layers.batch_norm(net, 0.99)
+            # net = tf.contrib.layers.batch_norm(net, 0.99)
+            net = add_conv_layer(net, [5, 5], WIDTH, 'conv{}_1'.format(i+2))
 
+            if histograms:
+                batch_sum = tf.reduce_sum(
+                        tf.cast(tf.greater(net, 0), tf.float32), axis=0)
+                tf.summary.scalar("conv{}_1_dead".format(i + 2),
+                        1 - tf.reduce_mean(tf.cast(tf.greater(batch_sum, 0), tf.float32)))
             net = tf.nn.elu(net) + I
             if histograms:
                 tf.summary.histogram("conv{}_1".format(i + 2), net)
@@ -279,7 +304,7 @@ def get_model_params(X, L, cpu=0):
 def main():
     args = get_args()
     with tf.name_scope('DataManagement'):
-        data_queue = tf.RandomShuffleQueue(60000, 128, [tf.int64, tf.float32, tf.int32],
+        data_queue = tf.RandomShuffleQueue(60000, 32, [tf.int64, tf.float32, tf.int32],
                 [[8, 8], 1, 1])
         X = tf.placeholder(tf.int64, [None, 8, 8], name='input')
         L_d = tf.placeholder(tf.float32, [None], name='labeled_value')
@@ -321,18 +346,18 @@ def main():
         with tf.name_scope("gradients"):
             MAX_DELAY = 200
             delay = tf.Variable(MAX_DELAY, trainable=False)
-            lr = tf.Variable(0.003, trainable=False)
+            lr = tf.Variable(1e-6, trainable=False)
             tf.summary.scalar("Learning_rate", lr)
-            opt = tf.train.AdamOptimizer(1e-4)
+            opt = tf.train.RMSPropOptimizer(lr, epsilon=0.1)
             gvs = opt.compute_gradients(error)
             tf.summary.scalar('gradient_norm', tf.global_norm(list(zip(*gvs))[0]))
 
-            clipped_gvs = [(tf.clip_by_norm(g, 5.0), v) for g, v in gvs]
+            clipped_gvs = [(g, v) for g, v in gvs]
             grad_descent_op = opt.apply_gradients(clipped_gvs, global_step=global_step)
 
             ema = tf.train.ExponentialMovingAverage(0.99)
             maintain_averages = ema.apply([error])
-            prev_error = tf.Variable(10.0)
+            prev_error = tf.Variable(100.0)
             tf.summary.scalar("shadow_error", ema.average(error))
 
             # lr, delay, prev_error
@@ -382,21 +407,26 @@ def main():
             # enqueue_op, X, L_d, coord)))
         train_thread = threading.Thread(target=train,
                 args=(sess, train_op, coord, summary_op, writer, global_step))
+        t += [train_thread]
+
+        save_thread = threading.Thread(target=_saver, args=(sess, saver, coord,
+            args.logdir, global_step))
+        t += [save_thread]
 
         for thread in t:
             thread.start()
-        train_thread.start()
+        print("Starting saver")
+        tf_bind = {'sess': sess, 'X': X, 'V': q_vs[0]}
+        print("Starting ai visualizer")
+        ai_visualizer(tf_bind, coord, t)
+        print("Exiting program...")
 
-        while True:
-            try:
-                time.sleep(10)
-                print("Data queue size:", sess.run(data_queue.size()))
-                saver.save(sess, os.path.join(args.logdir, "model"),
-                        global_step=global_step.eval())
-            except:
-                coord.request_stop()
-                coord.join([train_thread] + t)
-                exit()
+
+def _saver(sess, saver, coord, logdir, global_step):
+    while not coord.should_stop():
+        time.sleep(10)
+        saver.save(sess, os.path.join(logdir, 'model'),
+                global_step=sess.run(global_step))
 
 
 def board_visualizer():
@@ -553,20 +583,143 @@ def test_naive_minmax(filename="chesslogs/naiveminmax.pgn"):
     print(pgn.Game.from_board(board), file=f)
 
 
-def run_uci_mode():
-    if input() != 'uci':
-        exit()
-    board = chess.Board()
-    while True:
-        cmd = input()
-        args = cmd.split(' ')
-        if args[0] == 'isready':
-            print('readyok')
-        if args[0] == 'setoption':
-            pass
-        if args[0] == 'ucinewgame':
-            pass
-    pass
+class Visualizer():
+    def __init__(self, master, tf_bind=None):
+        self.master = master
+        self.board = chess.Board()
+        self._tf = tf_bind
+        self._set_widgets()
+
+    def _set_widgets(self):
+        self.master.title(
+                "Visualize value function of various chess positions!")
+
+        self._wv_text = tk.StringVar(value="White value")
+        self._bv_text = tk.StringVar(value="Black value")
+        def _periodic_update():
+            while True:
+                try:
+                    time.sleep(1)
+                    self._update_values()
+                except:
+                    return
+        threading.Thread(target=_periodic_update).start()
+        self.white_value = tk.Label(master=self.master, textvariable=self._wv_text)
+        self.white_value.grid(row=0, column=0)
+        self.black_value = tk.Label(master=self.master, textvariable=self._bv_text)
+        self.black_value.grid(row=1, column=0)
+        self.chessboard = tk.Label(master=self.master)
+        def _undo():
+            self.board.pop()
+            self._update_chessboard()
+            self._update_values()
+        self.undo_button = tk.Button(master=self.master, text="Undo",
+                command=_undo)
+        def _reset():
+            self.board.reset()
+            self._update_chessboard()
+            self._update_values()
+        self.reset_button = tk.Button(master=self.master, text="Reset board",
+                command=_reset)
+        self.undo_button.grid(row=0, column=1)
+        self.reset_button.grid(row=1, column=1)
+        im = self._get_chessboard()
+        self.chessboard.grid(row=2, column=0)
+        self._piece = tk.Label(master=self.master)
+        self._piece.pack_forget()
+        self._update_chessboard()
+        self._update_values()
+
+        holding_piece = {'button': False, 'start': None, 'placed': False}
+
+        def _getsqr(event):
+            l = 0
+            t = 0
+            b = self.chessboard.winfo_height() + t
+            r = self.chessboard.winfo_width() + l
+            column = (event.x - l) * 8 // (r - l)
+            row = 8 - (event.y - t) * 8 // (b - t)
+            sqr = chess.square(column, row - 1)
+            return sqr
+
+        def onclick(event):
+            holding_piece['button'] = True
+            sqr = _getsqr(event)
+            holding_piece['start'] = sqr
+
+        def motion(event):
+            if not holding_piece['button']:
+                return
+            if holding_piece['start'] is None:
+                return
+            if not holding_piece['placed']:
+                piece = self.board.piece_at(holding_piece['start'])
+                if piece is None:
+                    return
+                img = ImageTk.PhotoImage(self._get_piece(piece))
+                self._piece.configure(image=img)
+                self._piece.image = img
+                holding_piece['placed'] = True
+            self._piece.place(x=event.x, y=event.y)
+
+        def onrelease(event):
+            move = chess.Move(holding_piece['start'], _getsqr(event))
+            if self.board.is_legal(move):
+                self.board.push(move)
+                img = ImageTk.PhotoImage(self._get_chessboard())
+                self.chessboard.configure(image=img)
+                self.chessboard.image = img
+            holding_piece['button'] = True
+            holding_piece['start'] = None
+            self._piece.place_forget()
+            holding_piece['placed'] = False
+            self._update_values()
+
+        self.chessboard.bind('<ButtonPress-1>', onclick)
+        self.chessboard.bind('<ButtonRelease-1>', onrelease)
+        self.chessboard.bind('<B1-Motion>', motion)
+
+    def _update_chessboard(self):
+        img = ImageTk.PhotoImage(self._get_chessboard())
+        self.chessboard.configure(image=img)
+        self.chessboard.image = img
+
+    def _get_chessboard(self):
+        from chess import svg
+        svg_board = svg.board(self.board, coordinates=False)
+        return self._svg_to_img(svg_board)
+
+    def _get_piece(self, piece):
+        from chess import svg
+        svg_piece = svg.piece(piece)
+        return self._svg_to_img(svg_piece)
+
+    def _svg_to_img(self, svg):
+        pngbytes = cairosvg.svg2png(bytestring=bytes(svg, 'utf-8'))
+        im = Image.open(io.BytesIO(pngbytes))
+        return im
+
+    def _update_values(self):
+        sess = self._tf['sess']
+        X = self._tf['X']
+        V = self._tf['V']
+        wh_state, bl_state = convert_to_array(self.board)
+        wh_val = sess.run(V, feed_dict={X: wh_state[None]})
+        bl_val = sess.run(V, feed_dict={X: bl_state[None]})
+        self._wv_text.set("White value: {}".format(wh_val))
+        self._bv_text.set("Black value: {}".format(bl_val))
+
+
+def ai_visualizer(tf_bind, coord, threads):
+    root = tk.Tk()
+
+    v = Visualizer(root, tf_bind)
+
+    def close_window():
+        coord.request_stop()
+        coord.join(threads)
+    root.protocol('WM_DELETE_WINDOW', close_window)
+    root.mainloop()
 
 
 if __name__ == '__main__':
