@@ -14,6 +14,8 @@ import sys
 from PIL import Image, ImageTk
 import cairosvg
 import io
+import tensorflow
+
 
 try:
     import tkinter as tk
@@ -255,33 +257,35 @@ def train(sess, train, coord, summaries, writer, global_step):
 
 
 def build_net(X, histograms=False):
-    WIDTH=64
-    net = add_conv_layer(X, [5, 5], WIDTH, 'conv1')
+    WIDTH=256
+    net = add_conv_layer(X, [15, 15], 32, 'conv1')
     net = tf.nn.elu(net)
-    if histograms:
-        tf.summary.histogram('conv_1', net)
 
-    for i in range(10):
-        with tf.variable_scope("resnet{}".format(i)):
+    net = add_conv_layer(net, [1, 1], WIDTH, 'conv1_rescale')
+    net = tf.nn.elu(net)
+
+    for i in range(15):
+        with tf.variable_scope("resnetblock_{}".format(i)):
             I = net
-            # net = tf.contrib.layers.batch_norm(net, 0.99)
-            net = add_conv_layer(net, [5, 5], WIDTH, 'conv{}_0'.format(i+2))
+            net = add_conv_layer(net, [1, 1], 32, 'downscale')
+            net = tf.nn.elu(net)
+
+            net = add_conv_layer(net, [11, 11], 32, 'conv_{}'.format(i+2))
             if histograms:
                 batch_sum = tf.reduce_sum(
                         tf.cast(tf.greater(net, 0), tf.float32), axis=0)
                 tf.summary.scalar("conv{}_0_dead".format(i + 2),
                         1 - tf.reduce_mean(tf.cast(tf.greater(batch_sum, 0), tf.float32)))
             net = tf.nn.elu(net)
-            if histograms:
-                tf.summary.histogram("conv{}_0".format(i + 2), net)
-            # net = tf.contrib.layers.batch_norm(net, 0.99)
-            net = add_conv_layer(net, [5, 5], WIDTH, 'conv{}_1'.format(i+2))
+            net = add_conv_layer(net, [11, 11], 32, 'conv{}_1'.format(i+2))
 
             if histograms:
                 batch_sum = tf.reduce_sum(
                         tf.cast(tf.greater(net, 0), tf.float32), axis=0)
-                tf.summary.scalar("conv{}_1_dead".format(i + 2),
+                tf.summary.scalar("conv{}_dead".format(i + 2),
                         1 - tf.reduce_mean(tf.cast(tf.greater(batch_sum, 0), tf.float32)))
+            net = tf.nn.elu(net)
+            net = add_conv_layer(net, [1, 1], WIDTH, 'upscale')
             net = tf.nn.elu(net) + I
             if histograms:
                 tf.summary.histogram("conv{}_1".format(i + 2), net)
@@ -346,9 +350,9 @@ def main():
         with tf.name_scope("gradients"):
             MAX_DELAY = 200
             delay = tf.Variable(MAX_DELAY, trainable=False)
-            lr = tf.Variable(1e-6, trainable=False)
+            lr = tf.Variable(1e-3, trainable=False)
             tf.summary.scalar("Learning_rate", lr)
-            opt = tf.train.RMSPropOptimizer(lr, epsilon=0.1)
+            opt = tf.train.GradientDescentOptimizer(lr)
             gvs = opt.compute_gradients(error)
             tf.summary.scalar('gradient_norm', tf.global_norm(list(zip(*gvs))[0]))
 
