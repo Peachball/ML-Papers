@@ -10,20 +10,6 @@ import numpy as np
 import os
 import shutil
 
-class Model():
-    def __init__(self, input_dim, output_dim):
-        self.input_dim = input_dim
-        self.output_dim = output_dim
-        self.input = tf.placeholder(tf.float32, [None] + input_dim)
-        self.summaries = []
-
-    @abc.abstractmethod
-    def train_op(self):
-        pass
-
-    @abc.abstractmethod
-    def sample_action(self, obs):
-        pass
 
 class Trainer():
     @abc.abstractmethod
@@ -54,15 +40,27 @@ def get_args():
     return args
 
 
-class A2C(Model):
-    def __init__(self, input_dim, out_dim, batch_size=32, isdiscrete=False):
+class DQN():
+    def __init__(self, input_space, output_space):
+        if not type(output_space) == gym.spaces.Discrete:
+            raise ValueError("Requires discrete output space")
+        if type(input_space) != gym.spaces.Box:
+            raise NotImplementedError("Only supports box input space right now")
+        self.input = tf.placeholder(
+                tf.float32, [None] + list(input_space.shape))
+
+        self.data_queue = tf.RandomShuffleQueue(10000, 128, [tf.float32,
+            tf.float32], [list(input_space.shape), []], name='data_queue')
+        dqx, dqy = self.data_queue.dequeue_many(32)
+        # self.enqueue_op = self.data_queue.enqueue_many([self.input,
+
+
+class A2C():
+    def __init__(self, input_space, out_space, batch_size=32, isdiscrete=False):
         input_dim = list(input_dim)
         out_dim = list(out_dim)
-        super(A2C, self).__init__(input_dim, out_dim[0])
         self.init_train_op = False
-        self.data_queue = tf.RandomShuffleQueue(10000, 100, [tf.float32,
-            tf.float32, tf.float32], shapes=[input_dim, out_dim, 1])
-        self.train_data = self.data_queue.dequeue_many(batch_size)
+        self.input = get_placeholder(input_space)
         self.actions = tf.placeholder(tf.float32, [None] + out_dim,
                 name="action")
         self.rewards = tf.placeholder(tf.float32, [None, 1], name="reward")
@@ -132,11 +130,6 @@ class A2C(Model):
             return self.sa_v
 
     @property
-    def enqueue_op(self):
-        return self.data_queue.enqueue_many(
-                [self.input, self.actions, self.rewards])
-
-    @property
     def value(self):
         if self._init_value:
             return self.q_value
@@ -158,7 +151,7 @@ class A2C(Model):
 
     def _build_net(self, inp):
         net = None
-        w_init = tf.uniform_unit_scaling_initializer(0.01)
+        w_init = tf.uniform_unit_scaling_initializer(0.1)
         with tf.variable_scope("state_input", reuse=self.built_net):
             if len(self.input_dim) == 3:
                 net = add_conv_layer(inp, [8, 8], 16, "conv_1", strides=[4, 4],
@@ -200,6 +193,8 @@ class A2C(Model):
                 self.built_net = True
                 return value, [action_means, action_log_variance]
 
+
+
 class FeudalNet():
     def __init__(self, input_space, output_space, horizon=64, goal_size=16,
             intrinsic_reward_influence=0.5, discount_factor=0.99,
@@ -238,11 +233,6 @@ class FeudalNet():
         self.ir_influence = intrinsic_reward_influence
         self.summaries = {}
 
-        self.game_length = tf.placeholder(tf.float32, shape=())
-        self.total_reward = tf.placeholder(tf.float32, shape=())
-        # self.game_summaries = tf.summary.merge([
-                # tf.summary.scalar("Game Length", self.game_length),
-                # tf.summary.scalar("Total reward", self.total_reward)])
         self.discount = discount_factor
         self.entropy_reg = entropy_regularization
 
@@ -649,7 +639,7 @@ def run_A2C():
     envs = [gym.make(args.env) for i in range(args.threads)]
 
     global_step = tf.Variable(0, trainable=False, name='global_step')
-    m = A2C.from_env(env)
+    m = A3C.from_env(env)
 
     sw = tf.summary.FileWriter(args.logdir)
     saver = tf.train.Saver()
@@ -829,4 +819,4 @@ def run_feudal():
 
 
 if __name__ == '__main__':
-    run_feudal()
+    distributed_a3c()

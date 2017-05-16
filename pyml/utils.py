@@ -1,4 +1,5 @@
 import tensorflow as tf
+import gym
 
 def add_layer(l, out_dim, name, reuse=False, w_init=None, b_init=None,
         collections=None, biases=True):
@@ -79,3 +80,16 @@ def add_deconv_layer(l, filt_dim, out_channels, strides, name, reuse=None,
 
 def clip_gvs(gvs, magnitude, clipping_func=tf.clip_by_norm):
     return [(clipping_func(g, magnitude), v) for (g, v) in gvs if g is not None]
+
+
+def get_placeholder(space):
+    if type(space) == gym.spaces.Box:
+        return tf.placeholder(tf.float32, [None] + list(space.shape))
+    # if type(space) == gym.spaces.Discrete:
+        # return tf.placeholder(tf.int32, [None])
+    raise NotImplementedError("Cannot handle type: {}".format(type(space)))
+
+
+def get_scalar_summary(tag, value):
+    s = tf.Summary(value=[tf.Summary.Value(tag=tag, simple_value=value)])
+    return s
