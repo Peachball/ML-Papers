@@ -1,0 +1,10 @@
+localhost:2232 ps
+localhost:2233 ps
+localhost:2234 worker
+localhost:2235 worker
+localhost:2236 worker
+localhost:2237 worker
+localhost:2238 worker
+localhost:2239 worker
+localhost:2240 worker
+localhost:2241 worker
