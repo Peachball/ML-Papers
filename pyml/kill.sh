@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env sh
 WORKER_TARGET="ml:3"
 PS_TARGET="ml:4"
 

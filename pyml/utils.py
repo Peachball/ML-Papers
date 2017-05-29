@@ -82,9 +82,11 @@ def clip_gvs(gvs, magnitude, clipping_func=tf.clip_by_norm):
     return [(clipping_func(g, magnitude), v) for (g, v) in gvs if g is not None]
 
 
-def get_placeholder(space):
+def get_placeholder(space, name=None):
     if type(space) == gym.spaces.Box:
-        return tf.placeholder(tf.float32, [None] + list(space.shape))
+        return tf.placeholder(tf.float32, [None] + list(space.shape), name=name)
+    if type(space) == gym.spaces.Discrete:
+        return tf.placeholder(tf.int32, [None, space.n], name=name)
     # if type(space) == gym.spaces.Discrete:
         # return tf.placeholder(tf.int32, [None])
     raise NotImplementedError("Cannot handle type: {}".format(type(space)))
@@ -93,3 +95,25 @@ def get_placeholder(space):
 def get_scalar_summary(tag, value):
     s = tf.Summary(value=[tf.Summary.Value(tag=tag, simple_value=value)])
     return s
+
+
+def run_env(env, sess, X, a, render=False, initial_observation=None):
+    if initial_observation is None:
+        o = env.reset()
+    else:
+        o = initial_observation
+    d = False
+    obs = []
+    act = []
+    rew = []
+    info = []
+    while not d:
+        obs.append(o)
+        if render:
+            env.render()
+        action = sess.run(a, feed_dict={X: o[None]})
+        o, r, d, i = env.step(action)
+        rew.append(r)
+        act.append(action)
+        info.append(i)
+    return (obs, act, rew, info)

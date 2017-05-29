@@ -5,6 +5,7 @@ HELPER="ml:5"
 WORKERS=8
 PS_SERVERS=2
 HOME_DIR="/home/peachball/D/git/ML-Papers/pyml"
+LOGDIR="$HOME_DIR/tflogs/lstmcartpole/"
 ENV="CartPole-v0"
 
 tmux kill-window -t $HELPER
@@ -12,7 +13,7 @@ tmux kill-window -t $WORKER_TARGET
 tmux kill-window -t $PS_TARGET
 
 sleep 1
-rm -r "$HOME_DIR/tflogs/a3c/"
+rm -r $LOGDIR
 
 tmux new-window -t $WORKER_TARGET
 for i in $(seq 0 $(($WORKERS - 2)))
@@ -25,7 +26,8 @@ do
 	tmux send-keys -t "$WORKER_TARGET.$i" "cd $HOME_DIR" ENTER
 	tmux send-keys -t "$WORKER_TARGET.$i" "CUDA_VISIBLE_DEVICES= \
 python3 AsyncRL.py \
---task $i --cluster_file sample-hosts.txt --type worker --env $ENV" ENTER
+--task $i --cluster_file sample-hosts.txt --type worker --env $ENV --logdir \
+$LOGDIR" ENTER
 done
 
 tmux new-window -t $PS_TARGET
@@ -44,4 +46,4 @@ done
 
 tmux new-window -t $HELPER
 tmux send-keys -t $HELPER "cd $HOME_DIR" ENTER
-tmux send-keys -t $HELPER "tensorboard --logdir tflogs/a3c/" ENTER
+tmux send-keys -t $HELPER "tensorboard --logdir $LOGDIR" ENTER
