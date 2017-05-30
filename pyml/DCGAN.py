@@ -72,38 +72,45 @@ class DRAGANTrainer():
         self.m = m
         self.input = inp
         mean, var = tf.nn.moments(inp, axes=[0, 1, 2, 3])
+        tf.summary.scalar("inp_stddev", tf.sqrt(var), collections=['train'])
         delta = 0.5 * tf.sqrt(var) * tf.random_uniform(
                 tf.shape(inp), minval=-1.0, maxval=1.0)
-        alpha = tf.random_uniform((1,))
+        alpha = tf.random_uniform([tf.shape(inp)[0], 1, 1, 1])
         perturbed = inp * alpha + (1 - alpha) * (inp + delta)
+        tf.summary.image("perturbed_image", perturbed, collections=['train'])
         with tf.variable_scope("dragan"):
             avg_p = tf.reduce_mean(m.discriminator(perturbed, reuse=True))
-        grad_n = tf.global_norm(tf.gradients(avg_p, m.disc_var))
+        grad_n = tf.global_norm(tf.gradients(avg_p, perturbed))
         disc_error = tf.reduce_mean(
                 tf.nn.sigmoid_cross_entropy_with_logits(
                     labels=tf.ones_like(m.real_disc),
                     logits=m.real_disc)
                 + tf.nn.sigmoid_cross_entropy_with_logits(
                     labels=tf.zeros_like(m.real_disc),
-                    logits=m.fake_disc)
-                + lmbda * tf.square(grad_n - 1.0))
+                    logits=m.fake_disc))
+        disc_penalty = tf.reduce_mean(tf.square(grad_n - 1.0))
+        total_d_error = disc_error + lmbda * disc_penalty
         gen_error = tf.reduce_mean(
                 tf.nn.sigmoid_cross_entropy_with_logits(
                     labels=tf.ones_like(m.fake_disc),
                     logits=m.fake_disc))
-        tf.summary.scalar("discriminator_error", disc_error,
+        tf.summary.scalar('disc_cross_entropy', disc_error,
+                collections=['train'])
+        tf.summary.scalar("discriminator_penalty", disc_penalty,
+                collections=['train'])
+        tf.summary.scalar("discriminator_error", total_d_error,
                 collections=["train"])
         tf.summary.scalar("generator_error", gen_error, collections=["train"])
         global_step = tf.Variable(0, trainable=False, name="global_step")
-        disc_train_op = tf.train.AdamOptimizer(1e-4, beta1=0.5, beta2=0.9).minimize(disc_error,
+        disc_train_op = tf.train.RMSPropOptimizer(1e-5).minimize(total_d_error,
                 global_step=global_step, var_list=m.disc_var)
-        gen_train_op = tf.train.AdamOptimizer(1e-4, beta1=0.5, beta2=0.9).minimize(gen_error,
+        gen_train_op = tf.train.RMSPropOptimizer(1e-5).minimize(gen_error,
                 global_step=global_step, var_list=m.gen_var)
 
         self.global_step = global_step
         self.d_train_op = disc_train_op
         self.g_train_op = gen_train_op
-        self.d_err = disc_error
+        self.d_err = total_d_error
         self.g_err = gen_error
 
 
@@ -393,6 +400,7 @@ def train_GAN(dataset=None):
 
 def train_DRAGAN(LOGDIR="tflogs/dragan"):
     X = tf.placeholder(tf.float32, [None, 64, 64, 4])
+    tf.summary.image("input_image", X, collections=['train'])
     with tf.variable_scope("dragan"):
         m = DRAGAN(X)
     tf.summary.image("generated_image", m.generated, collections=["train"])
@@ -430,13 +438,22 @@ def train_DRAGAN(LOGDIR="tflogs/dragan"):
 
     with sv.managed_session() as sess:
         sw.add_graph(sess.graph)
+        data = dq.get()
         while not sv.should_stop():
-            data = dq.get()
-            # for i in range(2):
-                # sess.run(t.g_train_op, feed_dict={m.input: np.random.rand(32,
-                    # 64, 64, 4)})
-            s, _, _ = sess.run([summary_op, t.d_train_op, t.g_train_op],
+            # d_err = 10
+            # while d_err > 1:
+                # s, _, d_err = sess.run([summary_op, t.d_train_op, t.d_err],
+                        # feed_dict={m.input: data})
+                # sw.add_summary(s, global_step=sess.run(t.global_step))
+                # data = dq.get()
+            # g_err = 10
+            # while g_err > 1:
+                # s, _, g_err = sess.run([summary_op, t.g_train_op, t.g_err],
+                        # feed_dict={m.input: data})
+                # sw.add_summary(s, global_step=sess.run(t.global_step))
+            s, _, _ = sess.run([summary_op, t.g_train_op, t.d_train_op],
                     feed_dict={m.input: data})
+            data = dq.get()
             sw.add_summary(s, global_step=sess.run(t.global_step))
 
 
