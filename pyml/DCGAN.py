@@ -10,7 +10,7 @@ import queue
 import random
 
 
-class DRAGAN():
+class DCGAN():
     def __init__(self, inp):
         self.input = inp
         self.Z = tf.random_normal([tf.shape(inp)[0], 100])
@@ -39,15 +39,11 @@ class DRAGAN():
             net = tf.layers.conv2d_transpose(net, 1024, [3, 3], strides=(2, 2),
                     name="deconv0", padding="same")
             net = tf.nn.elu(net)
-            net = tf.layers.conv2d_transpose(net, 512, [5, 5], strides=(2, 2),
-                    padding="same", name="deconv1")
-            net = tf.nn.elu(net)
-            net = tf.layers.conv2d_transpose(net, 256, [5, 5], strides=(2, 2),
-                    padding="same", name="deconv2")
-            net = tf.nn.elu(net)
-            net = tf.layers.conv2d_transpose(net, 128, [5, 5], strides=(2, 2),
-                    padding="same", name="deconv3")
-            net = tf.nn.elu(net)
+            for i in range(3):
+                net = tf.layers.conv2d_transpose(net, 512 // (2 ** i), [5, 5],
+                        strides=(2, 2), padding="same",
+                        name="deconv{}".format(i + 1))
+                net = tf.nn.elu(net)
             net = tf.layers.conv2d_transpose(net, 4, [5, 5], strides=(2, 2),
                     padding="same", name="deconv4")
             net = tf.nn.sigmoid(net)
@@ -78,7 +74,7 @@ class DRAGANTrainer():
         alpha = tf.random_uniform([tf.shape(inp)[0], 1, 1, 1])
         perturbed = inp * alpha + (1 - alpha) * (inp + delta)
         tf.summary.image("perturbed_image", perturbed, collections=['train'])
-        with tf.variable_scope("dragan"):
+        with tf.variable_scope("dcgan"):
             avg_p = tf.reduce_mean(m.discriminator(perturbed, reuse=True))
         grad_n = tf.global_norm(tf.gradients(avg_p, perturbed))
         disc_error = tf.reduce_mean(
@@ -112,6 +108,41 @@ class DRAGANTrainer():
         self.g_train_op = gen_train_op
         self.d_err = total_d_error
         self.g_err = gen_error
+
+
+class WGANTrainer():
+    def __init__(self, m):
+        inp = m.input
+        lmbda = 10
+        epsilon = tf.random_uniform([tf.shape(inp)[0], 1, 1, 1])
+        perturbed = epsilon * inp + (1 - epsilon) * m.generated
+        tf.summary.image("perturbed_image", perturbed, collections=['train'])
+        with tf.variable_scope("dcgan"):
+            p_pred = tf.reduce_mean(m.discriminator(perturbed, reuse=True))
+        grad_penalty_norm = tf.global_norm(tf.gradients(p_pred, perturbed))
+        grad_penalty = tf.square(grad_penalty_norm - 1)
+        tf.summary.scalar("gradient_penalty", grad_penalty,
+                collections=['train'])
+
+        disc_loss = -tf.reduce_mean(m.real_disc) + tf.reduce_mean(m.fake_disc)
+        tf.summary.scalar('disc_loss', disc_loss, collections=['train'])
+        disc_loss += grad_penalty * lmbda
+        tf.summary.scalar('total_disc_loss', disc_loss, collections=['train'])
+        gen_loss = -tf.reduce_mean(m.fake_disc)
+        tf.summary.scalar('gen_loss', gen_loss, collections=['train'])
+
+        global_step = tf.Variable(0, trainable=False, name='global_step')
+        disc_train_op = tf.train.RMSPropOptimizer(1e-5).minimize(disc_loss,
+                var_list=m.disc_var, global_step=global_step)
+        gen_train_op = tf.train.RMSPropOptimizer(1e-5).minimize(gen_loss,
+                var_list=m.gen_var, global_step=global_step)
+
+        self.global_step = global_step
+        self.d_train_op = disc_train_op
+        self.g_train_op = gen_train_op
+        self.d_err = disc_loss
+        self.g_err = gen_loss
+
 
 
 class GAN:
@@ -398,15 +429,15 @@ def train_GAN(dataset=None):
                 exit()
 
 
-def train_DRAGAN(LOGDIR="tflogs/dragan"):
+def train_DRAGAN(LOGDIR="tflogs/gp-wgan"):
     X = tf.placeholder(tf.float32, [None, 64, 64, 4])
     tf.summary.image("input_image", X, collections=['train'])
-    with tf.variable_scope("dragan"):
-        m = DRAGAN(X)
+    with tf.variable_scope("dcgan"):
+        m = DCGAN(X)
     tf.summary.image("generated_image", m.generated, collections=["train"])
 
     with tf.name_scope("trainer"):
-        t = DRAGANTrainer(X, m)
+        t = WGANTrainer(m)
 
     summary_op = tf.summary.merge_all(key="train")
     sw = tf.summary.FileWriter(LOGDIR)
@@ -451,9 +482,12 @@ def train_DRAGAN(LOGDIR="tflogs/dragan"):
                 # s, _, g_err = sess.run([summary_op, t.g_train_op, t.g_err],
                         # feed_dict={m.input: data})
                 # sw.add_summary(s, global_step=sess.run(t.global_step))
-            s, _, _ = sess.run([summary_op, t.g_train_op, t.d_train_op],
-                    feed_dict={m.input: data})
-            data = dq.get()
+            for i in range(5):
+                s, _ = sess.run([summary_op, t.d_train_op], feed_dict={m.input:
+                    data})
+                data = dq.get()
+                sw.add_summary(s, global_step=sess.run(t.global_step))
+            s, _ = sess.run([summary_op, t.g_train_op], feed_dict={m.input: data})
             sw.add_summary(s, global_step=sess.run(t.global_step))
 
 
