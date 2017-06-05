@@ -10,6 +10,64 @@ import queue
 import random
 
 
+class CramerGAN():
+    def __init__(self, inp):
+        self.input = inp
+        self.Z = tf.random_normal([tf.shape(inp)[0], 100])
+        self.build_net()
+
+
+    def build_net(self):
+        self.generated = self.generator(self.Z)
+
+        self.real_disc = self.discriminator(self.input)
+        self.fake_disc = self.discriminator(self.generated, reuse=True)
+        curscope = tf.get_variable_scope().name
+        if len(curscope) > 0:
+            curscope = curscope + "/"
+        self.gen_var = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES,
+                scope=curscope + "generator")
+        self.disc_var = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES,
+                scope=curscope + "discriminator")
+
+
+    def generator(self, inp, reuse=None):
+        with tf.variable_scope("generator", reuse=reuse):
+            net = tf.layers.dense(inp, 1024, name="projection")
+            net = tf.nn.elu(net)
+            net = tf.reshape(net, [tf.shape(inp)[0], 2, 2, 256])
+            net = tf.layers.conv2d_transpose(net, 1024, [3, 3], strides=(2, 2),
+                    name="deconv0", padding="same")
+            net = tf.nn.elu(net)
+            for i in range(3):
+                net = tf.layers.conv2d_transpose(net, 512 // (2 ** i), [5, 5],
+                        strides=(2, 2), padding="same",
+                        name="deconv{}".format(i + 1))
+                net = tf.nn.elu(net)
+            net = tf.layers.conv2d_transpose(net, 4, [5, 5], strides=(2, 2),
+                    padding="same", name="deconv4")
+            net = tf.nn.sigmoid(net)
+            return net
+
+
+    def discriminator(self, inp, reuse=None):
+        with tf.variable_scope("discriminator", reuse=reuse):
+            net = inp
+            for i in range(4):
+                net = tf.layers.conv2d(net, 64 * 2 ** i, [5, 5], strides=(2, 2),
+                        name="conv{}".format(i + 1))
+                net = tf.nn.elu(net)
+            net = tf.contrib.layers.flatten(net)
+            net = tf.layers.dense(net, 256, name="fc")
+            return net
+
+
+class CramerTrainer():
+    def __init__(self, m):
+        lmbda = 10
+        epsilon = tf.random_uniform(tf.shape(m.input)[0])
+
+
 class DCGAN():
     def __init__(self, inp):
         self.input = inp
@@ -119,6 +177,7 @@ class WGANTrainer():
         tf.summary.image("perturbed_image", perturbed, collections=['train'])
         with tf.variable_scope("dcgan"):
             p_pred = tf.reduce_mean(m.discriminator(perturbed, reuse=True))
+        g = tf.gradients(p_pred, perturbed)
         grad_penalty_norm = tf.global_norm(tf.gradients(p_pred, perturbed))
         grad_penalty = tf.square(grad_penalty_norm - 1)
         tf.summary.scalar("gradient_penalty", grad_penalty,
@@ -132,9 +191,9 @@ class WGANTrainer():
         tf.summary.scalar('gen_loss', gen_loss, collections=['train'])
 
         global_step = tf.Variable(0, trainable=False, name='global_step')
-        disc_train_op = tf.train.RMSPropOptimizer(1e-5).minimize(disc_loss,
+        disc_train_op = tf.train.AdamOptimizer(0, beta1=0.5, beta2=0.9).minimize(disc_loss,
                 var_list=m.disc_var, global_step=global_step)
-        gen_train_op = tf.train.RMSPropOptimizer(1e-5).minimize(gen_loss,
+        gen_train_op = tf.train.AdamOptimizer(0, beta1=0.5, beta2=0.9).minimize(gen_loss,
                 var_list=m.gen_var, global_step=global_step)
 
         self.global_step = global_step
