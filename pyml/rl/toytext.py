@@ -138,12 +138,29 @@ def lakerunner(LOGDIR="tflogs/gridworld", ENV="gridworld"):
                 if mpl and iters % 100 == 0:
                     print("Updating image")
                     states = np.arange(16)
-                    v = sess.run(m.value,
+                    v, po_r = sess.run([m.value, m.policy],
                             feed_dict={X: states})
+                    po_r = np.exp(po_r) / np.exp(po_r).sum(axis=1)[:, None]
+                    po_r = np.reshape(po_r, (4, 4, 4))
                     disp = np.zeros((6, 6))
                     disp[1:5, 1:5] = v.reshape((4, 4))
                     disp[5, 5] = 1
+                    plt.subplot(121)
+                    plt.title("value")
                     plt.imshow(disp, cmap='hot', interpolation='none')
+
+                    plt.subplot(122)
+                    plt.title("policy")
+                    pc = np.zeros((16, 16))
+                    pc[0, 0] = 0
+                    pc[11, 11] = 1
+                    for ir, r in zip(range(4), range(1, 12, 3)):
+                        for ic, c in zip(range(4), range(1, 12, 3)):
+                            pc[r - 1, c + 0] = po_r[ir, ic, 0]
+                            pc[r + 0, c + 1] = po_r[ir, ic, 1]
+                            pc[r + 1, c + 0] = po_r[ir, ic, 2]
+                            pc[r + 0, c - 1] = po_r[ir, ic, 3]
+                    plt.imshow(pc, cmap='hot', interpolation='none')
                     plt.pause(0.01)
                 iters += 1
             visual = False
