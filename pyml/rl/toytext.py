@@ -9,6 +9,25 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 
+class ICMModule():
+    def __init__(self, inp, act):
+        self.input = inp
+        self.action = act
+        with tf.variable_scope("forward"):
+            net = tf.concat([inp[:-1], act[:-1]], 1)
+            net = tf.layers.dense(net, inp.get_shape().as_list()[1], name="fc")
+            pred_state = net
+            self.r = tf.norm(pred_state - inp[1:], axis=1)
+        with tf.variable_scope("inverse"):
+            net = tf.concat([inp[:-1], inp[1:]], 1)
+            net = tf.layers.dense(net, act.get_shape().as_list()[1], name="fc")
+            pred_act = net
+        self.forward_loss = tf.reduce_sum(tf.square(pred_state - inp[1:]),
+                axis=1)
+        self.inverse_loss = tf.nn.softmax_cross_entropy_with_logits(
+                labels=act[:-1], logits=pred_act)
+
+
 class DiscreteModel():
     def __init__(self, inp, act_space):
         self.input = inp
@@ -26,33 +45,43 @@ class DiscreteModel():
         return policy, value
 
 
-def lakerunner(LOGDIR="tflogs/frozenlake", ENV="FrozenLake-v0"):
+def lakerunner(LOGDIR="tflogs/taxi", ENV="Taxi-v2"):
     env = gym.make(ENV)
     X = tf.placeholder(tf.int32, [None], name="state")
     R = tf.placeholder(tf.float32, [None], name="R")
     A = tf.placeholder(tf.int32, [None], name="action")
     exp_x = tf.one_hot(X, env.observation_space.n)
+    expanded_a = tf.one_hot(A, env.action_space.n)
     with tf.variable_scope("model"):
         m = DiscreteModel(exp_x, env.action_space)
+        icm = ICMModule(exp_x, expanded_a)
     m.vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope="model")
 
     log_policy = tf.nn.log_softmax(m.policy)
     R_e = tf.expand_dims(R, axis=1)
     value_loss = tf.reduce_sum(tf.square(m.value - R_e))
     advantage = tf.stop_gradient(R_e - m.value)
-    expanded_a = tf.one_hot(A, env.action_space.n)
     policy_loss = -tf.reduce_sum(expanded_a * log_policy * advantage)
     entropy = - tf.reduce_sum(tf.nn.softmax(m.policy) * log_policy)
     tf.summary.scalar("model/entropy", entropy)
     tf.summary.scalar("model/policy_loss", policy_loss)
     tf.summary.scalar("model/value_loss", value_loss)
 
+    forward_loss = tf.reduce_mean(icm.forward_loss)
+    inverse_loss = tf.reduce_mean(icm.inverse_loss)
+    tf.summary.scalar("icm/forward_loss", forward_loss)
+    tf.summary.scalar("icm/inverse_loss", inverse_loss)
+
+    beta = 0.2
     loss = 0.25 * value_loss + policy_loss - 0.01 * entropy
+    icm_loss = beta * forward_loss + (1 - beta) * inverse_loss
     v_grads = tf.gradients(value_loss, m.vars)[2:]
 
     summary_op = tf.summary.merge_all()
     global_step = tf.Variable(0, trainable=False)
-    train_op = tf.train.GradientDescentOptimizer(1e-1).minimize(loss,
+    train_op = tf.train.GradientDescentOptimizer(1e-3).minimize(loss,
+            global_step=global_step)
+    icm_train_op = tf.train.GradientDescentOptimizer(1e-1).minimize(icm_loss,
             global_step=global_step)
 
     sw = tf.summary.FileWriter(LOGDIR)
@@ -67,47 +96,52 @@ def lakerunner(LOGDIR="tflogs/frozenlake", ENV="FrozenLake-v0"):
         iters = 0
         while True:
             done = False
+            obs = []
             rew = []
             act = []
 
             o = env.reset()
+            def train(last_o, terminal=False, gamma=0.99):
+                estimated_R = []
+                ir = sess.run(icm.r, feed_dict={X: obs + [last_o], A: act + [0]})
+                if not terminal:
+                    rR = sess.run(m.value, feed_dict={X: [last_o]})[0, 0]
+                else:
+                    rR = 0
+
+                for mr, inr in zip(rew[::-1], ir[::-1]):
+                    rR = gamma * rR + inr + mr
+                    estimated_R = [rR] + estimated_R
+                s, _ = sess.run([summary_op, train_op],
+                        feed_dict={X: obs, A: act, R: estimated_R})
+                sw.add_summary(s, sess.run(global_step))
+                sess.run(icm_train_op,
+                        feed_dict={X: obs + [last_o],
+                            A: act + [0] # Note the [0] is a filler
+                            })
+            visual = True
             while not done:
-                # env.render()
-                a = sess.run(m.sample, feed_dict={X: [o]})
+                obs.append(o)
+                if visual:
+                    env.render()
+                    time.sleep(0.1)
+                a, a_dist = sess.run([m.sample, m.policy], feed_dict={X: [o]})
+                np.set_printoptions(suppress=True)
                 new_o, r, done, i = env.step(a)
 
-                estimated_R = r + 0.9 * sess.run(m.value, feed_dict={X: [o]})[0][0]
-                s, _, g = sess.run([summary_op, train_op, v_grads],
-                        feed_dict={X: [o], A: [a], R: [estimated_R]})
-                sw.add_summary(s, global_step=sess.run(global_step))
+                print(sess.run(icm.r, feed_dict={X: [o, new_o], A: [a, 0]}))
+                act.append(a)
+                rew.append(r)
+
+                if len(obs) > 5:
+                    train(new_o)
+                    obs = []
+                    rew = []
+                    act = []
                 o = new_o
 
                 iters += 1
-                # print("Value estimation")
-                if iters % 500 == 0:
-                    states = np.arange(env.observation_space.n)
-                    ps, vs, scheck = sess.run([m.policy, m.value, m.input],
-                            feed_dict={X: states})
-                    plt.subplot(121)
-                    plt.title("value")
-                    plt.imshow(np.reshape(vs, (4, 4)), cmap='hot',
-                            interpolation='none')
-                    plt.subplot(122)
-                    plt.title("policy")
-                    di = np.zeros((12, 12))
-                    di[0,0] = 0
-                    di[11,11] = 1
-                    ps_softmax = np.exp(ps) / np.sum(np.exp(ps), axis=1)[:,None]
-                    ps_softmax = np.reshape(ps_softmax, (4, 4, 4))
-                    for ir, r in enumerate(range(1, 12, 3)):
-                        for ic, c in enumerate(range(1, 12, 3)):
-                            di[r, c - 1] = ps_softmax[ir, ic, 0]
-                            di[r + 1, c] = ps_softmax[ir, ic, 1]
-                            di[r, c + 1] = ps_softmax[ir, ic, 2]
-                            di[r - 1, c] = ps_softmax[ir, ic, 3]
-                    plt.imshow(di, cmap='hot', interpolation='none')
-                    print("Updated graphic")
-                    plt.pause(0.01)
+            train(new_o, terminal=True)
             s = tf.Summary(value=[
                 tf.Summary.Value(tag="reward", simple_value=sum(rew)),
                 tf.Summary.Value(tag="length", simple_value=len(rew))
@@ -146,4 +180,4 @@ def play_taxi_env(ENV='Taxi-v2'):
 
 
 if __name__ == '__main__':
-    play_taxi_env()
+    lakerunner()
