@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from gridworld import GridWorld
 import sys
 sys.path.append("..")
 
@@ -24,8 +25,8 @@ class ICMModule():
             pred_act = net
         self.forward_loss = tf.reduce_sum(tf.square(pred_state - inp[1:]),
                 axis=1)
-        self.inverse_loss = tf.nn.softmax_cross_entropy_with_logits(
-                labels=act[:-1], logits=pred_act)
+        self.inverse_loss = tf.losses.softmax_cross_entropy(
+                act[:-1], pred_act)
 
 
 class DiscreteModel():
@@ -45,8 +46,11 @@ class DiscreteModel():
         return policy, value
 
 
-def lakerunner(LOGDIR="tflogs/taxi", ENV="Taxi-v2"):
-    env = gym.make(ENV)
+def lakerunner(LOGDIR="tflogs/gridworld", ENV="gridworld"):
+    if ENV == 'gridworld':
+        env = GridWorld()
+    else:
+        env = gym.make(ENV)
     X = tf.placeholder(tf.int32, [None], name="state")
     R = tf.placeholder(tf.float32, [None], name="R")
     A = tf.placeholder(tf.int32, [None], name="action")
@@ -63,25 +67,25 @@ def lakerunner(LOGDIR="tflogs/taxi", ENV="Taxi-v2"):
     advantage = tf.stop_gradient(R_e - m.value)
     policy_loss = -tf.reduce_sum(expanded_a * log_policy * advantage)
     entropy = - tf.reduce_sum(tf.nn.softmax(m.policy) * log_policy)
-    tf.summary.scalar("model/entropy", entropy)
-    tf.summary.scalar("model/policy_loss", policy_loss)
-    tf.summary.scalar("model/value_loss", value_loss)
+    bs = tf.cast(tf.shape(X)[0], tf.float32)
+    tf.summary.scalar("model/entropy", entropy / bs)
+    tf.summary.scalar("model/policy_loss", policy_loss / bs)
+    tf.summary.scalar("model/value_loss", value_loss / bs)
 
-    forward_loss = tf.reduce_mean(icm.forward_loss)
-    inverse_loss = tf.reduce_mean(icm.inverse_loss)
-    tf.summary.scalar("icm/forward_loss", forward_loss)
-    tf.summary.scalar("icm/inverse_loss", inverse_loss)
+    forward_loss = tf.reduce_sum(icm.forward_loss)
+    inverse_loss = tf.reduce_sum(icm.inverse_loss)
+    tf.summary.scalar("icm/forward_loss", forward_loss / bs)
+    # tf.summary.scalar("icm/inverse_loss", inverse_loss / bs)
 
-    beta = 0.2
+    beta = 0.9
     loss = 0.25 * value_loss + policy_loss - 0.01 * entropy
     icm_loss = beta * forward_loss + (1 - beta) * inverse_loss
-    v_grads = tf.gradients(value_loss, m.vars)[2:]
 
     summary_op = tf.summary.merge_all()
     global_step = tf.Variable(0, trainable=False)
     train_op = tf.train.GradientDescentOptimizer(1e-3).minimize(loss,
             global_step=global_step)
-    icm_train_op = tf.train.GradientDescentOptimizer(1e-1).minimize(icm_loss,
+    icm_train_op = tf.train.GradientDescentOptimizer(1e-2).minimize(icm_loss,
             global_step=global_step)
 
     sw = tf.summary.FileWriter(LOGDIR)
@@ -91,17 +95,24 @@ def lakerunner(LOGDIR="tflogs/taxi", ENV="Taxi-v2"):
             save_model_secs=30)
 
     plt.ion()
-    with sv.managed_session() as sess:
+    gpu_config = tf.GPUOptions(allow_growth=True)
+    config = tf.ConfigProto(gpu_options=gpu_config)
+    with sv.managed_session(config=config) as sess:
         sw.add_graph(sess.graph)
         iters = 0
         while True:
             done = False
             obs = []
             rew = []
+            total_reward = []
+            total_states = []
             act = []
 
             o = env.reset()
-            def train(last_o, terminal=False, gamma=0.99):
+            def train(last_o, terminal=False, gamma=0.9, curiosity=False,
+                    mpl=True):
+                if len(obs) == 0:
+                    return
                 estimated_R = []
                 ir = sess.run(icm.r, feed_dict={X: obs + [last_o], A: act + [0]})
                 if not terminal:
@@ -110,47 +121,66 @@ def lakerunner(LOGDIR="tflogs/taxi", ENV="Taxi-v2"):
                     rR = 0
 
                 for mr, inr in zip(rew[::-1], ir[::-1]):
-                    rR = gamma * rR + inr + mr
+                    if curiosity:
+                        rR = gamma * rR + inr + mr
+                    else:
+                        rR = gamma * rR + mr
                     estimated_R = [rR] + estimated_R
                 s, _ = sess.run([summary_op, train_op],
                         feed_dict={X: obs, A: act, R: estimated_R})
                 sw.add_summary(s, sess.run(global_step))
-                sess.run(icm_train_op,
-                        feed_dict={X: obs + [last_o],
-                            A: act + [0] # Note the [0] is a filler
-                            })
-            visual = True
+                if curiosity:
+                    sess.run(icm_train_op,
+                            feed_dict={X: obs + [last_o],
+                                A: act + [0] # Note the [0] is a filler
+                                })
+                nonlocal iters
+                if mpl and iters % 100 == 0:
+                    print("Updating image")
+                    states = np.arange(16)
+                    v = sess.run(m.value,
+                            feed_dict={X: states})
+                    disp = np.zeros((6, 6))
+                    disp[1:5, 1:5] = v.reshape((4, 4))
+                    disp[5, 5] = 1
+                    plt.imshow(disp, cmap='hot', interpolation='none')
+                    plt.pause(0.01)
+                iters += 1
+            visual = False
             while not done:
                 obs.append(o)
+                total_states.append(o)
                 if visual:
                     env.render()
                     time.sleep(0.1)
                 a, a_dist = sess.run([m.sample, m.policy], feed_dict={X: [o]})
                 np.set_printoptions(suppress=True)
                 new_o, r, done, i = env.step(a)
+                total_reward += [r]
 
-                print(sess.run(icm.r, feed_dict={X: [o, new_o], A: [a, 0]}))
                 act.append(a)
                 rew.append(r)
 
-                if len(obs) > 5:
+                if len(obs) > 32:
                     train(new_o)
                     obs = []
                     rew = []
                     act = []
                 o = new_o
 
-                iters += 1
             train(new_o, terminal=True)
             s = tf.Summary(value=[
-                tf.Summary.Value(tag="reward", simple_value=sum(rew)),
-                tf.Summary.Value(tag="length", simple_value=len(rew))
+                tf.Summary.Value(tag="reward", simple_value=sum(total_reward)),
+                tf.Summary.Value(tag="length", simple_value=len(total_reward))
                 ])
             sw.add_summary(s, global_step=sess.run(global_step))
 
 
-def play_text_env(ENV='FrozenLake-v0'):
-    env = gym.make(ENV)
+def play_text_env(ENV='gridworld'):
+    if ENV == 'gridworld':
+        env = GridWorld()
+    else:
+        env = gym.make(ENV)
     move_to_num = {'l': 0, 'd': 1, 'r': 2, 'u': 3}
     env.reset()
     while True:
