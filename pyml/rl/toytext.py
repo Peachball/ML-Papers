@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 from gridworld import GridWorld
+from models import ICMModule, DiscreteModel
 import sys
 sys.path.append("..")
 
@@ -10,40 +11,34 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 
-class ICMModule():
-    def __init__(self, inp, act):
-        self.input = inp
-        self.action = act
-        with tf.variable_scope("forward"):
-            net = tf.concat([inp[:-1], act[:-1]], 1)
-            net = tf.layers.dense(net, inp.get_shape().as_list()[1], name="fc")
-            pred_state = net
-            self.r = tf.norm(pred_state - inp[1:], axis=1)
-        with tf.variable_scope("inverse"):
-            net = tf.concat([inp[:-1], inp[1:]], 1)
-            net = tf.layers.dense(net, act.get_shape().as_list()[1], name="fc")
-            pred_act = net
-        self.forward_loss = tf.reduce_sum(tf.square(pred_state - inp[1:]),
-                axis=1)
-        self.inverse_loss = tf.losses.softmax_cross_entropy(
-                act[:-1], pred_act)
-
-
-class DiscreteModel():
-    def __init__(self, inp, act_space):
-        self.input = inp
-        assert isinstance(act_space, gym.spaces.Discrete)
-        self.action_space = act_space
-        self.policy, self.value = self.build_net(self.input)
-        self.sample = tf.squeeze(tf.multinomial(self.policy, 1))
-
-
-    def build_net(self, inp):
-        net = inp
-        policy = tf.layers.dense(net, self.action_space.n,
-                kernel_initializer=tf.random_normal_initializer(stddev=0.01), name="policy")
-        value = tf.layers.dense(net, 1, name="value", use_bias=False)
-        return policy, value
+def a3c_trainer(env, train, policy, summary_op = None, batch_size=32,
+        should_stop=lambda: False):
+    while not should_stop():
+        obs = []
+        rew = []
+        act = []
+        total_r = []
+        o = env.reset()
+        d = False
+        while not d:
+            obs.append(o)
+            a = policy(o)
+            act.append(a)
+            new_o, done, r, i = env.step(a)
+            total_r.append(r)
+            rew.append(r)
+            if summary_op is not None:
+                summary_op(i)
+            if len(obs) >= batch_size and not d:
+                train(obs, rew, act, new_o, False)
+                obs = []
+                rew = []
+                act = []
+            o = new_o
+        train(obs, rew, act, new_o, True)
+        if summary_op is not None:
+            summary_op({'game_length': len(total_r),
+                'game_reward': sum(total_r)})
 
 
 def lakerunner(LOGDIR="tflogs/gridworld", ENV="gridworld"):
@@ -74,8 +69,8 @@ def lakerunner(LOGDIR="tflogs/gridworld", ENV="gridworld"):
 
     forward_loss = tf.reduce_sum(icm.forward_loss)
     inverse_loss = tf.reduce_sum(icm.inverse_loss)
-    tf.summary.scalar("icm/forward_loss", forward_loss / bs)
-    # tf.summary.scalar("icm/inverse_loss", inverse_loss / bs)
+    tf.summary.scalar("icm/forward_loss", forward_loss / (bs - 1))
+    # tf.summary.scalar("icm/inverse_loss", inverse_loss / (bs - 1))
 
     beta = 0.9
     loss = 0.25 * value_loss + policy_loss - 0.01 * entropy
@@ -83,9 +78,9 @@ def lakerunner(LOGDIR="tflogs/gridworld", ENV="gridworld"):
 
     summary_op = tf.summary.merge_all()
     global_step = tf.Variable(0, trainable=False)
-    train_op = tf.train.GradientDescentOptimizer(1e-3).minimize(loss,
+    train_op = tf.train.GradientDescentOptimizer(3e-4).minimize(loss,
             global_step=global_step)
-    icm_train_op = tf.train.GradientDescentOptimizer(1e-2).minimize(icm_loss,
+    icm_train_op = tf.train.GradientDescentOptimizer(3e-3).minimize(icm_loss,
             global_step=global_step)
 
     sw = tf.summary.FileWriter(LOGDIR)
@@ -99,19 +94,12 @@ def lakerunner(LOGDIR="tflogs/gridworld", ENV="gridworld"):
     config = tf.ConfigProto(gpu_options=gpu_config)
     with sv.managed_session(config=config) as sess:
         sw.add_graph(sess.graph)
-        iters = 0
-        while True:
-            done = False
-            obs = []
-            rew = []
-            total_reward = []
-            total_states = []
-            act = []
-
-            o = env.reset()
-            def train(last_o, terminal=False, gamma=0.9, curiosity=False,
+        while not sv.should_stop():
+            iters = 0
+            def train(obs, rew, act, last_o, terminal=False, gamma=0.9, curiosity=True,
                     mpl=True):
                 if len(obs) == 0:
+                    print("what")
                     return
                 estimated_R = []
                 ir = sess.run(icm.r, feed_dict={X: obs + [last_o], A: act + [0]})
@@ -119,7 +107,6 @@ def lakerunner(LOGDIR="tflogs/gridworld", ENV="gridworld"):
                     rR = sess.run(m.value, feed_dict={X: [last_o]})[0, 0]
                 else:
                     rR = 0
-
                 for mr, inr in zip(rew[::-1], ir[::-1]):
                     if curiosity:
                         rR = gamma * rR + inr + mr
@@ -136,7 +123,6 @@ def lakerunner(LOGDIR="tflogs/gridworld", ENV="gridworld"):
                                 })
                 nonlocal iters
                 if mpl and iters % 100 == 0:
-                    print("Updating image")
                     states = np.arange(16)
                     v, po_r = sess.run([m.value, m.policy],
                             feed_dict={X: states})
@@ -145,9 +131,10 @@ def lakerunner(LOGDIR="tflogs/gridworld", ENV="gridworld"):
                     disp = np.zeros((6, 6))
                     disp[1:5, 1:5] = v.reshape((4, 4))
                     disp[5, 5] = 1
+                    disp[5, 4] = -1
                     plt.subplot(121)
                     plt.title("value")
-                    plt.imshow(disp, cmap='hot', interpolation='none')
+                    plt.imshow(disp, cmap='Greys', interpolation='none')
 
                     plt.subplot(122)
                     plt.title("policy")
@@ -156,41 +143,26 @@ def lakerunner(LOGDIR="tflogs/gridworld", ENV="gridworld"):
                     pc[11, 11] = 1
                     for ir, r in zip(range(4), range(1, 12, 3)):
                         for ic, c in zip(range(4), range(1, 12, 3)):
-                            pc[r - 1, c + 0] = po_r[ir, ic, 0]
-                            pc[r + 0, c + 1] = po_r[ir, ic, 1]
-                            pc[r + 1, c + 0] = po_r[ir, ic, 2]
-                            pc[r + 0, c - 1] = po_r[ir, ic, 3]
-                    plt.imshow(pc, cmap='hot', interpolation='none')
+                            pc[r - 0, c - 1] = po_r[ir, ic, 0]
+                            pc[r + 1, c + 0] = po_r[ir, ic, 1]
+                            pc[r + 0, c + 1] = po_r[ir, ic, 2]
+                            pc[r - 1, c - 0] = po_r[ir, ic, 3]
+                    plt.imshow(pc, cmap='Greys', interpolation='none')
+                    plt.suptitle("Global step: {}".format(
+                        sess.run(global_step)))
                     plt.pause(0.01)
                 iters += 1
-            visual = False
-            while not done:
-                obs.append(o)
-                total_states.append(o)
-                if visual:
-                    env.render()
-                    time.sleep(0.1)
-                a, a_dist = sess.run([m.sample, m.policy], feed_dict={X: [o]})
-                np.set_printoptions(suppress=True)
-                new_o, r, done, i = env.step(a)
-                total_reward += [r]
 
-                act.append(a)
-                rew.append(r)
+            def policy(state):
+                return sess.run(m.sample, feed_dict={X: [state]})
 
-                if len(obs) > 32:
-                    train(new_o)
-                    obs = []
-                    rew = []
-                    act = []
-                o = new_o
+            def record_summary(info):
+                v = [tf.Summary.Value(tag=k, simple_value=k)
+                    for k, v in info.items()]
+                sw.add_summary(tf.Summary(value=v),
+                    global_step=sess.run(global_step))
+            a3c_trainer(env, train, policy, record_summary, batch_size=5)
 
-            train(new_o, terminal=True)
-            s = tf.Summary(value=[
-                tf.Summary.Value(tag="reward", simple_value=sum(total_reward)),
-                tf.Summary.Value(tag="length", simple_value=len(total_reward))
-                ])
-            sw.add_summary(s, global_step=sess.run(global_step))
 
 
 def play_text_env(ENV='gridworld'):
@@ -199,11 +171,12 @@ def play_text_env(ENV='gridworld'):
     else:
         env = gym.make(ENV)
     move_to_num = {'l': 0, 'd': 1, 'r': 2, 'u': 3}
-    env.reset()
+    o = env.reset()
     while True:
         env.render()
+        print("State: ", o)
         m = input().strip()
-        _, r, d, _ = env.step(move_to_num[m])
+        o, r, d, _ = env.step(move_to_num[m])
         print("Reward: ", r)
         if d:
             env.render()
