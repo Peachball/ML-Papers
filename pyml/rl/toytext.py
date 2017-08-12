@@ -11,8 +11,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 
-def a3c_trainer(env, train, policy, summary_op = None, batch_size=32,
-        should_stop=lambda: False):
+def a3c_trainer(env, train, policy, summary_op = None, batch_size=5,
+        should_stop=lambda: False, visualize=False):
     while not should_stop():
         obs = []
         rew = []
@@ -21,10 +21,13 @@ def a3c_trainer(env, train, policy, summary_op = None, batch_size=32,
         o = env.reset()
         d = False
         while not d:
+            if visualize:
+                env.render()
+                time.sleep(0.1)
             obs.append(o)
             a = policy(o)
             act.append(a)
-            new_o, done, r, i = env.step(a)
+            new_o, r, d, i = env.step(a)
             total_r.append(r)
             rew.append(r)
             if summary_op is not None:
@@ -69,7 +72,8 @@ def lakerunner(LOGDIR="tflogs/gridworld", ENV="gridworld"):
 
     forward_loss = tf.reduce_sum(icm.forward_loss)
     inverse_loss = tf.reduce_sum(icm.inverse_loss)
-    tf.summary.scalar("icm/forward_loss", forward_loss / (bs - 1))
+    tf.summary.scalar("icm/forward_loss", forward_loss / (bs - 1),
+            collections=['icm'])
     # tf.summary.scalar("icm/inverse_loss", inverse_loss / (bs - 1))
 
     beta = 0.9
@@ -77,10 +81,11 @@ def lakerunner(LOGDIR="tflogs/gridworld", ENV="gridworld"):
     icm_loss = beta * forward_loss + (1 - beta) * inverse_loss
 
     summary_op = tf.summary.merge_all()
+    icm_summary_op = tf.summary.merge_all('icm')
     global_step = tf.Variable(0, trainable=False)
-    train_op = tf.train.GradientDescentOptimizer(3e-4).minimize(loss,
+    train_op = tf.train.GradientDescentOptimizer(3e-3).minimize(loss,
             global_step=global_step)
-    icm_train_op = tf.train.GradientDescentOptimizer(3e-3).minimize(icm_loss,
+    icm_train_op = tf.train.GradientDescentOptimizer(3e-2).minimize(icm_loss,
             global_step=global_step)
 
     sw = tf.summary.FileWriter(LOGDIR)
@@ -96,8 +101,8 @@ def lakerunner(LOGDIR="tflogs/gridworld", ENV="gridworld"):
         sw.add_graph(sess.graph)
         while not sv.should_stop():
             iters = 0
-            def train(obs, rew, act, last_o, terminal=False, gamma=0.9, curiosity=True,
-                    mpl=True):
+            def train(obs, rew, act, last_o, terminal=False, gamma=0.9,
+                    curiosity=True, mpl=True):
                 if len(obs) == 0:
                     print("what")
                     return
@@ -117,10 +122,11 @@ def lakerunner(LOGDIR="tflogs/gridworld", ENV="gridworld"):
                         feed_dict={X: obs, A: act, R: estimated_R})
                 sw.add_summary(s, sess.run(global_step))
                 if curiosity:
-                    sess.run(icm_train_op,
+                    s, _ = sess.run([icm_summary_op, icm_train_op],
                             feed_dict={X: obs + [last_o],
                                 A: act + [0] # Note the [0] is a filler
                                 })
+                    sw.add_summary(s, sess.run(global_step))
                 nonlocal iters
                 if mpl and iters % 100 == 0:
                     states = np.arange(16)
@@ -157,12 +163,12 @@ def lakerunner(LOGDIR="tflogs/gridworld", ENV="gridworld"):
                 return sess.run(m.sample, feed_dict={X: [state]})
 
             def record_summary(info):
-                v = [tf.Summary.Value(tag=k, simple_value=k)
+                v = [tf.Summary.Value(tag=k, simple_value=int(v))
                     for k, v in info.items()]
                 sw.add_summary(tf.Summary(value=v),
                     global_step=sess.run(global_step))
-            a3c_trainer(env, train, policy, record_summary, batch_size=5)
 
+            a3c_trainer(env, train, policy, summary_op=record_summary, batch_size=5)
 
 
 def play_text_env(ENV='gridworld'):

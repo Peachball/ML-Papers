@@ -18,10 +18,10 @@ class GridWorld(gym.Env):
             [1, 0, 0, 0],
             [0, 0, 1, 2]])
         self.transitions = {
-                0: (0, -1), # UP
-                1: (1, 0),  # RIGHT
-                2: (0, 1),  # DOWN
-                3: (-1, 0)  # LEFT
+                0: (0, -1), # LEFT
+                1: (1, 0),  # DOWN
+                2: (0, 1),  # RIGHT
+                3: (-1, 0)  # UP
                 }
         self._reset()
 
@@ -30,10 +30,11 @@ class GridWorld(gym.Env):
         t = self.transitions[action]
         x, y = self.player
         ns = (x + t[0], y + t[1])
+        r = 0
         if 0 > ns[0] or ns[0] >= 4 or 0 > ns[1] or ns[1] >= 4: # No movement
             ns = self.player
+            r = -1
 
-        r = 0
         if self.grid[ns] == 2:
             r = 1
         if self.grid[ns] == 1:
@@ -45,7 +46,7 @@ class GridWorld(gym.Env):
 
 
     def _get_state(self):
-        return self.player[0] * self.dim + self.player[0]
+        return self.player[0] * self.dim + self.player[1]
 
 
     def _reset(self):
