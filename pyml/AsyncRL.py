@@ -29,7 +29,7 @@ class ICM():
         with tf.variable_scope("state_rep"):
             self.state = self.state_rep(self.input)
         with tf.variable_scope("forward"):
-            net = tf.concat([self.state, self.action], axis=1)
+            net = tf.concat([self.state[:-1], self.action[:-1]], axis=1)
             net = tf.layers.dense(net, 256, name="fc1")
             net = tf.nn.elu(net)
             net = tf.layers.dense(net, 256, name="fc2")
@@ -38,7 +38,7 @@ class ICM():
                     kernel_initializer=tf.uniform_unit_scaling_initializer(0.01))
             net = tf.nn.elu(net)
             self.state_prediction = net
-            self.r_i = 0.5 * tf.norm(self.state - net, axis=1)
+            self.r_i = 0.5 * tf.norm(self.state[1:] - net, axis=1)
         with tf.variable_scope("inverse"):
             net = tf.concat([self.state[:-1], self.state[1:]], axis=1)
             net = tf.layers.dense(net, 256, name="fc1")
