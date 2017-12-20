@@ -14,7 +14,7 @@ import sys
 from PIL import Image, ImageTk
 import cairosvg
 import io
-import tensorflow
+import tensorflow as tf
 
 
 try:

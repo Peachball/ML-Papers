@@ -700,6 +700,7 @@ def sample(p, action_space):
         return sample_multidiscrete(p.squeeze(), action_space)
     raise NotImplementedError()
 
+
 def trainer(model, sess, sw, env, coord, device, gs):
     MAX_SEQUENCE_LENGTH = 400
     while not coord.should_stop():
@@ -771,6 +772,7 @@ def trainer(model, sess, sw, env, coord, device, gs):
                 model.summaries[device]],
                 feed_dict=feed_dict)
             sw.add_summary(s, global_step=sess.run(gs))
+
 
 def run_feudal():
     OUTPUT_LOG_DIR="tflogs/fun"

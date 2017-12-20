@@ -5,6 +5,8 @@ import codecs
 import os
 import subprocess
 import itertools
+import PIL
+
 
 def _load_hehexd_image(index, dataset='hehexdDataSet', image_dim=(512, 512)):
     from os.path import join, isfile
@@ -45,6 +47,20 @@ def load_cifar100():
     from keras.datsets import cifar100
     (x, y), _ = cifar100.load_data()
     return (x, y)
+
+
+def load_imdb_sentiment(data_dir="../datasets/aclImdb/train/8k/",
+        pos="8kpos.txt", neg="8kneg.txt"):
+    pf = os.path.join(data_dir, pos)
+    nf = os.path.join(data_dir, neg)
+    def readfile(f):
+        d = []
+        for l in f:
+            d.append([int(x) for x in l.strip().split(' ')])
+        return d
+    pdata = readfile(open(pf, 'r'))
+    ndata = readfile(open(nf, 'r'))
+    return (pdata, ndata)
 
 
 def load_cornell_corpus(start=0, end=0):
@@ -114,6 +130,12 @@ def decode_spm(arrs, model_file):
         stderr=subprocess.PIPE)
     decoded = p.communicate(input=bytes(arrs, 'utf-8'))[0]
     return decoded.decode('utf-8')
+
+
+def ponydata_generator(batch_size,
+        data_dir="../datasets/equestriadaily/distorted_64x64"):
+    from PIL import Image
+    raise NotImplementedError("Lol I'm lazy")
 
 
 if __name__ == '__main__':

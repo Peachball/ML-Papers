@@ -656,5 +656,8 @@ def distributed_icm():
         raise ValueError("Type must be worker or ps, not {}".format(args.type))
 
 
+def synchronous_a2c(env_str):
+    pass
+
 if __name__ == '__main__':
     distributed_icm()

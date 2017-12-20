@@ -44,11 +44,40 @@ def a3c_trainer(env, train, policy, summary_op = None, batch_size=5,
                 'game_reward': sum(total_r)})
 
 
-def lakerunner(LOGDIR="tflogs/gridworld", ENV="gridworld"):
-    if ENV == 'gridworld':
-        env = GridWorld()
+def _parse_env(ENV):
+    if ENV == "gridworld":
+        return GridWorld()
     else:
-        env = gym.make(ENV)
+        return gym.make(ENV)
+
+
+def _visualize(policy, value):
+    disp = np.zeros((6, 6))
+    disp[1:5, 1:5] = value.reshape((4, 4))
+    disp[5, 5] = 1
+    disp[5, 4] = -1
+    plt.subplot(121)
+    plt.title("value")
+    plt.imshow(disp, cmap='Greys', interpolation='none')
+
+    plt.subplot(122)
+    plt.title("policy")
+    pc = np.zeros((16, 16))
+    pc[0, 0] = 0
+    pc[11, 11] = 1
+    for ir, r in zip(range(4), range(1, 12, 3)):
+        for ic, c in zip(range(4), range(1, 12, 3)):
+            pc[r - 0, c - 1] = policy[ir, ic, 0]
+            pc[r + 1, c + 0] = policy[ir, ic, 1]
+            pc[r + 0, c + 1] = policy[ir, ic, 2]
+            pc[r - 1, c - 0] = policy[ir, ic, 3]
+    plt.imshow(pc, cmap='Greys', interpolation='none')
+    pass
+
+
+def lakerunner(LOGDIR="tflogs/gridworld", ENV="gridworld"):
+    env = _parse_env(ENV)
+
     X = tf.placeholder(tf.int32, [None], name="state")
     R = tf.placeholder(tf.float32, [None], name="R")
     A = tf.placeholder(tf.int32, [None], name="action")
@@ -77,8 +106,8 @@ def lakerunner(LOGDIR="tflogs/gridworld", ENV="gridworld"):
     # tf.summary.scalar("icm/inverse_loss", inverse_loss / (bs - 1))
 
     beta = 0.9
-    loss = 0.25 * value_loss + policy_loss - 0.01 * entropy
     icm_loss = beta * forward_loss + (1 - beta) * inverse_loss
+    loss = 0.25 * value_loss + policy_loss - 0.01 * entropy
 
     summary_op = tf.summary.merge_all()
     icm_summary_op = tf.summary.merge_all('icm')
@@ -95,9 +124,7 @@ def lakerunner(LOGDIR="tflogs/gridworld", ENV="gridworld"):
             save_model_secs=30)
 
     plt.ion()
-    gpu_config = tf.GPUOptions(allow_growth=True)
-    config = tf.ConfigProto(gpu_options=gpu_config)
-    with sv.managed_session(config=config) as sess:
+    with sv.managed_session() as sess:
         sw.add_graph(sess.graph)
         while not sv.should_stop():
             iters = 0
@@ -134,26 +161,7 @@ def lakerunner(LOGDIR="tflogs/gridworld", ENV="gridworld"):
                             feed_dict={X: states})
                     po_r = np.exp(po_r) / np.exp(po_r).sum(axis=1)[:, None]
                     po_r = np.reshape(po_r, (4, 4, 4))
-                    disp = np.zeros((6, 6))
-                    disp[1:5, 1:5] = v.reshape((4, 4))
-                    disp[5, 5] = 1
-                    disp[5, 4] = -1
-                    plt.subplot(121)
-                    plt.title("value")
-                    plt.imshow(disp, cmap='Greys', interpolation='none')
-
-                    plt.subplot(122)
-                    plt.title("policy")
-                    pc = np.zeros((16, 16))
-                    pc[0, 0] = 0
-                    pc[11, 11] = 1
-                    for ir, r in zip(range(4), range(1, 12, 3)):
-                        for ic, c in zip(range(4), range(1, 12, 3)):
-                            pc[r - 0, c - 1] = po_r[ir, ic, 0]
-                            pc[r + 1, c + 0] = po_r[ir, ic, 1]
-                            pc[r + 0, c + 1] = po_r[ir, ic, 2]
-                            pc[r - 1, c - 0] = po_r[ir, ic, 3]
-                    plt.imshow(pc, cmap='Greys', interpolation='none')
+                    _visualize(po_r, v)
                     plt.suptitle("Global step: {}".format(
                         sess.run(global_step)))
                     plt.pause(0.01)
@@ -169,6 +177,10 @@ def lakerunner(LOGDIR="tflogs/gridworld", ENV="gridworld"):
                     global_step=sess.run(global_step))
 
             a3c_trainer(env, train, policy, summary_op=record_summary, batch_size=5)
+
+
+def a2c_lakerunner(LOGDIR="tflogs/a2c_gridworld", ENV="gridworld"):
+    pass
 
 
 def play_text_env(ENV='gridworld'):

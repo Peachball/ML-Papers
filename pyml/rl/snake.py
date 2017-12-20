@@ -4,7 +4,6 @@ from gym import error, spaces, utils
 import random
 import sys
 from six import StringIO
-import getch
 import time
 
 class Snake(gym.Env):

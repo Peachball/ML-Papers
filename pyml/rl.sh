@@ -25,7 +25,7 @@ for i in $(seq 0 $(($WORKERS - 1)))
 do
 	tmux send-keys -t "$WORKER_TARGET.$i" "cd $HOME_DIR" ENTER
 	tmux send-keys -t "$WORKER_TARGET.$i" "CUDA_VISIBLE_DEVICES= \
-python3 AsyncRL.py \
+python AsyncRL.py \
 --task $i --cluster_file sample-hosts.txt --type worker --env $ENV --logdir \
 $LOGDIR" ENTER
 done
@@ -40,7 +40,7 @@ done
 for i in $(seq 0 $(($PS_SERVERS- 1)))
 do
 	tmux send-keys -t "$PS_TARGET.$i" "cd $HOME_DIR" ENTER
-	tmux send-keys -t "$PS_TARGET.$i" "CUDA_VISIBLE_DEVICES= python3 AsyncRL.py \
+	tmux send-keys -t "$PS_TARGET.$i" "CUDA_VISIBLE_DEVICES= python AsyncRL.py \
 --task $i --cluster_file sample-hosts.txt --type ps --env $ENV" ENTER
 done
 

@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-
 import tensorflow as tf
 import numpy as np
 import os
@@ -107,7 +106,7 @@ class Seq2Seq():
         self.n_word, self.n_word_state = self.dec(inp, self.end_enc_state)
 
 
-def train_chatbot(LOGDIR="tflogs/seq2seqchatbot",
+def train_chatbot(LOGDIR="tflogs/smallseq2seq",
         MODEL_FILE="../datasets/cornell movie-dialogs corpus/8k.model"):
     x = tf.placeholder(tf.int32, [None, None], name="input_sentences")
     sentence_lengths = tf.placeholder(tf.int32, [None], name="seq_lengths")
@@ -175,11 +174,52 @@ def train_chatbot(LOGDIR="tflogs/seq2seqchatbot",
                 print(decode_spm(' '.join(map(lambda x: str(x), gen_s)),
                     MODEL_FILE))
                 print(gen_s)
-                print("Actual response:")
-                print(decode_spm(' '.join(map(lambda x: str(x), go[0,:glen[0]])),
-                    MODEL_FILE))
-                print(go[0,:glen[0]])
+                # print("Actual response:")
+                # print(decode_spm(' '.join(map(lambda x: str(x), go[0,:glen[0]])),
+                    # MODEL_FILE))
+                # print(go[0,:glen[0]])
                 # print(gen_s[0,1:])
+
+
+def interactive_chatbot(LOGDIR="tflogs/seq2seqchatbot",
+        MODEL_FILE="../datasets/cornell movie-dialogs corpus/8k.model"):
+    x = tf.placeholder(tf.int32, [None, None], name="input_sentences")
+    sentence_lengths = tf.placeholder(tf.int32, [None], name="seq_lengths")
+    o = tf.placeholder(tf.int32, [None, None], name="gal_sentences")
+    out_lengths = tf.placeholder(tf.int32, [None], name='out_len')
+    with tf.variable_scope("model") as scope:
+        m = Seq2Seq(x, o, 8000, sentence_lengths, out_lengths)
+    output_sentence = tf.argmax(m.decoded_logits, axis=-1)
+    global_step = tf.Variable(0, name="global_step")
+
+    sv = tf.train.Supervisor(logdir=LOGDIR,
+            summary_op=None,
+            summary_writer=None,
+            save_model_secs=30)
+    with sv.managed_session() as sess:
+        while True:
+            inp_s = encode_spm(input().strip(), MODEL_FILE)
+            print(inp_s)
+            print("Input sentence:")
+            s = decode_spm(' '.join(list(map(lambda x: str(x), inp_s))), MODEL_FILE)
+            print(s)
+            inp_s = [inp_s]
+
+            gen_s = [np.array([[0]])]
+            s = sess.run(m.end_enc_state, feed_dict={x: inp_s, sentence_lengths:
+                [len(inp_s)]})
+            while gen_s[-1][0,-1] != 2 and len(gen_s) < 100:
+                s, d_log = sess.run([m.end_dec_state, m.decoded_logits],
+                        feed_dict={m.end_enc_state: s, o: gen_s[-1]})
+                word_id = np.argmax(d_log, axis=-1)
+                gen_s.append(word_id)
+            gen_s = np.array(gen_s)
+            gen_s = gen_s.squeeze()
+
+            print("Bot response:")
+            print(decode_spm(' '.join(map(lambda x: str(x), gen_s)),
+                MODEL_FILE))
+            print(gen_s)
 
 
 def get_batch(convs, batch_size=32):
@@ -205,6 +245,37 @@ def get_batch(convs, batch_size=32):
                     o[3] = np.array(o[3])
                     yield o
                     o = [[], [], [], []]
+
+
+class SequenceClassifier():
+    def __init__(self, X, x_len=None, vocab_size=8000, embedding_size=16):
+        self.input = X
+        self.vocab_size = vocab_size
+        if x_len is None:
+            s = tf.shape(self.input)
+            self.sent_length = tf.fill([s[0]], s[1])
+        else:
+            self.sent_length = x_len
+        self.V = tf.Variable(tf.random_normal([vocab_size, embedding_size]))
+        self.embedded_input = tf.nn.embedding_lookup(self.V, self.input)
+
+
+    def build_net(self, inp):
+        lstm = tf.contrib.rnn.MultiRNNCell([tf.contrib.rnn.LSTMCell(256) for x
+            in range(3)])
+        self.init_state = lstm.zero_state(tf.shape(inp)[0], tf.float32)
+        outputs, self.end_state = tf.nn.dynamic_rnn(lstm, self.embedded_input,
+                sequence_length=self.sent_length, initial_state=self.init_state)
+        net_out = tf.layers.dense(outputs[:,-1,:], self.vocab_size)
+        self.output = net_out
+
+
+def sentiment_analysis():
+    (x_p, x_n) = load_imdb_sentiment()
+    def get_sent_len(v):
+        return list(map(lambda l: len(l), v))
+    x_p_len = get_sent_len(x_p)
+    x_n_len = get_sent_len(x_n)
 
 
 if __name__ == '__main__':
